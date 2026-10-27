@@ -22,6 +22,11 @@ libraries, FreeType, fontconfig, ncurses, DejaVu fonts, Noto CJK fonts, Python,
 and Weston. `flake.lock` pins the compiler to the same revision as the sibling
 `../jihoo` checkout used to develop this project.
 
+The development shell sets `$SHELL` to Bash with Readline support so Banana's
+default shell supports line editing and colored prompts. Nix's build-time Bash
+lacks Readline and prints the prompt's `\[` and `\]` markers literally. Re-enter
+`nix develop` after changing the flake to apply this setting.
+
 To develop against changes in that local checkout without updating the lock:
 
 ```sh

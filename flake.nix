@@ -24,10 +24,15 @@
       devShells = eachSystem (system:
         let c = configFor system; in {
           default = c.pkgs.mkShell {
-            packages = c.tools ++ [ c.pkgs.python3 c.pkgs.weston c.pkgs.wayland-utils ];
+            packages = c.tools ++ [ c.pkgs.bashInteractive c.pkgs.python3 c.pkgs.weston c.pkgs.wayland-utils ];
             buildInputs = c.libraries;
             FONTCONFIG_FILE = c.fonts;
             LD_LIBRARY_PATH = nixpkgs.lib.makeLibraryPath c.libraries;
+            # nix develop sets SHELL to the build-time Bash, which has no
+            # Readline support and prints PS1's \[ and \] markers literally.
+            shellHook = ''
+              export SHELL=${c.pkgs.bashInteractive}/bin/bash
+            '';
           };
         });
 
