@@ -1,0 +1,88 @@
+// GLFW key numbers -> terminal escape sequences. No platform calls here.
+pub fn utf8(inout text: String, cp: u32) {
+    if cp <= 0x7f { text.push(cp as u8) }
+    else if cp <= 0x7ff {
+        text.push((0xc0 | (cp >> 6)) as u8); text.push((0x80 | (cp & 63)) as u8)
+    } else if cp <= 0xffff {
+        text.push((0xe0 | (cp >> 12)) as u8); text.push((0x80 | ((cp >> 6) & 63)) as u8)
+        text.push((0x80 | (cp & 63)) as u8)
+    } else if cp <= 0x10ffff {
+        text.push((0xf0 | (cp >> 18)) as u8); text.push((0x80 | ((cp >> 12) & 63)) as u8)
+        text.push((0x80 | ((cp >> 6) & 63)) as u8); text.push((0x80 | (cp & 63)) as u8)
+    }
+}
+
+pub fn key_sequence(key: i32, mods: i32, application: bool) -> String {
+    var out = String.new()
+    let shift = mods & 1 != 0
+    let ctrl = mods & 2 != 0
+    let alt = mods & 4 != 0
+    if ctrl && key >= 65 && key <= 90 {
+        if alt { out.push(27) }
+        out.push((key - 64) as u8)
+        return out
+    }
+    if ctrl && (key == 32 || key == 50 || key == 91 || key == 92 || key == 93 || key == 54 || key == 45) {
+        if alt { out.push(27) }
+        if key == 32 || key == 50 { out.push(0) }
+        else if key == 54 { out.push(30) }
+        else if key == 45 { out.push(31) }
+        else { out.push((key - 64) as u8) }
+        return out
+    }
+    if key == 256 || key == 257 || key == 335 || key == 258 || key == 259 {
+        if alt { out.push(27) }
+        if key == 256 { out.push(27) }
+        else if key == 257 || key == 335 { out.push(13) }
+        else if key == 259 { out.push(if ctrl { 8 } else { 127 }) }
+        else if shift { out.push_str("\x1b[Z") }
+        else { out.push(9) }
+        return out
+    }
+    var final: u8 = 0
+    if key == 265 { final = 'A' }
+    else if key == 264 { final = 'B' }
+    else if key == 262 { final = 'C' }
+    else if key == 263 { final = 'D' }
+    else if key == 268 { final = 'H' }
+    else if key == 269 { final = 'F' }
+    let modifier = 1 + (if shift { 1 } else { 0 }) + (if alt { 2 } else { 0 }) + (if ctrl { 4 } else { 0 })
+    if final != 0 {
+        if modifier > 1 {
+            out.push_str("\x1b[1;"); modifier.show(&out); out.push(final)
+        } else { out.push_str(if application { "\x1bO" } else { "\x1b[" }); out.push(final) }
+        return out
+    }
+    if key >= 290 && key <= 293 {
+        if modifier > 1 { out.push_str("\x1b[1;"); modifier.show(&out) }
+        else { out.push_str("\x1bO") }
+        out.push(('P' as i32 + key - 290) as u8)
+        return out
+    }
+    var number: i64 = 0
+    if key == 260 { number = 2 }
+    else if key == 261 { number = 3 }
+    else if key == 266 { number = 5 }
+    else if key == 267 { number = 6 }
+    else if key >= 294 && key <= 301 {
+        let codes = [15, 17, 18, 19, 20, 21, 23, 24]
+        number = codes[(key - 294) as i64]
+    }
+    if number > 0 {
+        out.push_str("\x1b["); number.show(&out)
+        if modifier > 1 { out.push(';'); modifier.show(&out) }
+        out.push('~')
+    }
+    out
+}
+
+pub fn paste(text: str, bracketed: bool) -> String {
+    var out = String.new()
+    if bracketed { out.push_str("\x1b[200~") }
+    for b in text {
+        // Do not allow pasted ESC to terminate bracketed-paste framing.
+        if b != 27 { out.push(if b == 10 && !bracketed { 13 } else { b }) }
+    }
+    if bracketed { out.push_str("\x1b[201~") }
+    out
+}

@@ -1,0 +1,210 @@
+import api
+import input
+import pty
+import renderer
+import terminal
+import std.env
+import std.ffi
+import std.fs
+import std.libc
+import std.sys
+
+struct App { term: terminal.Terminal, session: pty.Session }
+
+export fn on_error(code: i32, message: *u8) {
+    unsafe {
+        sys.write_err("banana: ")
+        sys.write_err(ffi.copy_c_string(message).as_str())
+        sys.write_err("\n")
+    }
+}
+
+export fn on_char(window: *u8, cp: u32) {
+    unsafe {
+        let app = api.glfwGetWindowUserPointer(window) as *App
+        if app == null { return }
+        if api.glfwGetKey(window, 341) != 0 || api.glfwGetKey(window, 345) != 0 { return }
+        var text = String.new()
+        if api.glfwGetKey(window, 342) != 0 || api.glfwGetKey(window, 346) != 0 { text.push(27) }
+        input.utf8(&text, cp)
+        (*app).session.send(text.as_str())
+        (*app).term.view = 0; (*app).term.dirty = true
+    }
+}
+
+export fn on_key(window: *u8, key: i32, scancode: i32, action: i32, mods: i32) {
+    if action == 0 { return }
+    unsafe {
+        let app = api.glfwGetWindowUserPointer(window) as *App
+        if app == null { return }
+        if mods & 1 != 0 && (key == 266 || key == 267) {
+            (*app).term.scroll_view(if key == 266 { (*app).term.rows / 2 } else { 0 - (*app).term.rows / 2 })
+            return
+        }
+        if (mods & 3 == 3 && key == 86) || (mods & 1 != 0 && key == 260) {
+            let clip = api.glfwGetClipboardString(window)
+            if clip != null {
+                let text = ffi.copy_c_string(clip)
+                let pasted = input.paste(text.as_str(), (*app).term.bracketed_paste)
+                (*app).session.send(pasted.as_str())
+            }
+        } else {
+            let seq = input.key_sequence(key, mods, (*app).term.application_cursor)
+            (*app).session.send(seq.as_str())
+        }
+        (*app).term.view = 0; (*app).term.dirty = true
+    }
+}
+
+export fn on_scroll(window: *u8, dx: f64, dy: f64) {
+    unsafe {
+        let app = api.glfwGetWindowUserPointer(window) as *App
+        if app != null { (*app).term.scroll_view((dy * 3.0) as i64) }
+    }
+}
+
+fn configure_terminfo() {
+    // A development binary finds the database generated next to it by build.sh.
+    if env.get("TERMINFO").is_some() { return }
+    var path = [0 as u8; 4096]
+    let n = unsafe { api.readlink("/proc/self/exe", &path[0], 4096) }
+    if n <= 0 || n >= 4096 { return }
+    let text = unsafe { make_str(&path[0], n) }
+    var end = n
+    while end > 0 && text[end - 1] != '/' { end -= 1 }
+    var database = String.from(text[0..end]); database.push_str("terminfo")
+    let c = ffi.c_string(database.as_str()).unwrap()
+    unsafe { api.setenv("TERMINFO", c.as_str().ptr, 0) }
+}
+
+fn run() -> i32 {
+    let args = env.args()
+    var command = Vec(str).new()
+    var family: str = "DejaVu Sans Mono"
+    var font_size: i64 = 18
+    var smoke: str = ""
+    var i = 1
+    while i < args.len() {
+        let arg = args[i]
+        if arg == "--help" || arg == "-h" {
+            println("Banana — a Wayland OpenGL terminal written in jihoo")
+            println("Usage: banana [--font FAMILY] [--font-size PIXELS] [-e|-- COMMAND ARG...]")
+            println("       banana --smoke-test OUTPUT.ppm")
+            println("Keys: Ctrl+Shift+V / Shift+Insert paste; Shift+PageUp/PageDown or wheel scroll.")
+            return 0
+        } else if arg == "--font" || arg == "--font-size" || arg == "--smoke-test" {
+            if i + 1 >= args.len() { sys.write_err("banana: option requires a value\n"); return 2 }
+            i += 1
+            if arg == "--font" { family = args[i] }
+            else if arg == "--smoke-test" { smoke = args[i] }
+            else {
+                match args[i].parse_int() {
+                    Some(n) => { if n < 8 || n > 48 { sys.write_err("banana: font size must be 8..48\n"); return 2 }; font_size = n }
+                    None => { sys.write_err("banana: invalid font size\n"); return 2 }
+                }
+            }
+        } else if arg == "--" || arg == "-e" {
+            i += 1
+            while i < args.len() { command.push(args[i]); i += 1 }
+            if command.is_empty() { sys.write_err("banana: command required after -e/--\n"); return 2 }
+            break
+        } else { sys.write_err("banana: unknown option; use --help\n"); return 2 }
+        i += 1
+    }
+    if command.is_empty() {
+        if smoke.len > 0 {
+            command.push("sh"); command.push("-c")
+            command.push("printf '\x1b[1;33mBANANA\x1b[0m  /  jihoo + Wayland + OpenGL\r\n\r\nNative PTY shell connected.\r\n\x1b[31mred  \x1b[32mgreen  \x1b[34mblue  \x1b[38;2;200;140;255mtruecolor\x1b[0m\r\nUTF-8: 안녕하세요 — 日本語\r\n\x1b[4mUnderline\x1b[0m  \x1b[7mInverse\x1b[0m\r\n'; test -t 0 && test -t 1 && test -t 2")
+        } else {
+            command.push(match env.get("SHELL") { Some(shell) => shell, None => "sh" })
+        }
+    }
+    configure_terminfo()
+    var app = App { term: terminal.Terminal.new(80, 24), session: pty.spawn(command, 80, 24) }
+    unsafe {
+        api.glfwSetErrorCallback(on_error)
+        api.glfwInitHint(0x00050003, 0x00060003) // GLFW_PLATFORM_WAYLAND
+        // Keep the smoke test independent of optional desktop decoration plugins.
+        if smoke.len > 0 { api.glfwInitHint(0x00053001, 0x00038002) }
+        if api.glfwInit() == 0 { sys.write_err("banana: cannot initialize Wayland; check WAYLAND_DISPLAY and XDG_RUNTIME_DIR\n"); return 1 }
+        api.glfwWindowHint(0x00022002, 3); api.glfwWindowHint(0x00022003, 3)
+        api.glfwWindowHint(0x00022008, 0x00032001) // OpenGL 3.3 core
+        api.glfwWindowHint(0x0002200b, 0x00036002) // EGL on Wayland
+        api.glfwWindowHintString(0x00026001, "banana")
+        let window = api.glfwCreateWindow(1000, 650, "Banana", null, null)
+        if window == null { api.glfwTerminate(); return 1 }
+        api.glfwMakeContextCurrent(window); api.glfwSwapInterval(1)
+        api.glfwSetWindowUserPointer(window, &app as *u8)
+        api.glfwSetCharCallback(window, on_char); api.glfwSetKeyCallback(window, on_key)
+        api.glfwSetScrollCallback(window, on_scroll)
+        var scale: f32 = 1.0; var scale_y: f32 = 1.0
+        api.glfwGetWindowContentScale(window, &scale, &scale_y)
+        var render = renderer.Renderer.new(family, font_size, scale)
+        var old_width: i32 = 0; var old_height: i32 = 0
+        var last_cursor = true
+        let started = api.glfwGetTime()
+        var captured = false
+        var rendered_frames: i64 = 0
+        while api.glfwWindowShouldClose(window) == 0 {
+            app.session.receive(&app.term)
+            if !app.term.title.is_empty() {
+                let title = ffi.c_string(app.term.title.as_str()).unwrap()
+                api.glfwSetWindowTitle(window, title.as_str().ptr)
+                app.term.title.clear()
+            }
+            var width: i32 = 0; var height: i32 = 0
+            api.glfwGetFramebufferSize(window, &width, &height)
+            var next_scale: f32 = 1.0
+            api.glfwGetWindowContentScale(window, &next_scale, &scale_y)
+            if next_scale != scale {
+                render = renderer.Renderer.new(family, font_size, next_scale)
+                scale = next_scale; old_width = 0
+            }
+            if width > 0 && height > 0 {
+                var resized = false
+                if width != old_width || height != old_height {
+                    let cols = terminal.clamp((width as i64 - 2 * render.padding) / render.cell_width, 2, 1000)
+                    let rows = terminal.clamp((height as i64 - 2 * render.padding) / render.cell_height, 1, 500)
+                    app.term.resize(cols, rows); app.term.dirty = true
+                    app.session.resize(cols, rows, width, height)
+                    old_width = width; old_height = height
+                    resized = true
+                }
+                let cursor = smoke.len > 0 || (api.glfwGetTime() * 2.0) as i64 % 2 == 0
+                if cursor != last_cursor { app.term.dirty = true; last_cursor = cursor }
+                if smoke.len > 0 && !captured { app.term.dirty = true }
+                if app.term.dirty {
+                    render.draw(app.term, width, height, cursor)
+                    let error = api.glGetError()
+                    if error != 0 { panic("OpenGL rendering error") }
+                    // EGL applies the initial Wayland surface resize at swap.
+                    // Read back a subsequent frame, after the drawable settles.
+                    if smoke.len > 0 && app.session.eof && rendered_frames >= 2 {
+                        render.screenshot(smoke, width, height); captured = true
+                    }
+                    api.glfwSwapBuffers(window)
+                    rendered_frames += 1
+                    app.term.dirty = resized
+                }
+            }
+            if app.session.eof && app.session.exited {
+                if smoke.len == 0 || captured { break }
+                app.term.dirty = true
+            }
+            if smoke.len > 0 && api.glfwGetTime() - started > 10.0 { break }
+            api.glfwWaitEventsTimeout(0.008)
+        }
+        // GPU objects must be destroyed while their context is current.
+        drop(render)
+        api.glfwSetWindowUserPointer(window, null)
+        api.glfwDestroyWindow(window); api.glfwTerminate()
+        if smoke.len > 0 && !captured { sys.write_err("banana: smoke test did not capture a frame\n"); return 1 }
+    }
+    if app.session.exited { app.session.exit_code() } else { 0 }
+}
+
+fn main() {
+    let status = run()
+    // run() has returned, so its PTY and GPU destructors have completed.
+    if status != 0 { sys.exit(status) }
+}

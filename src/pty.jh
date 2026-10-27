@@ -1,0 +1,126 @@
+import api
+import std.ffi
+import std.libc
+import terminal
+
+pub struct Session {
+    pub fd: i32
+    pub pid: i32
+    pub exited: bool
+    pub eof: bool
+    pub status: i32
+    queue: String
+    sent: i64
+}
+
+pub fn spawn(args: Vec(str), cols: i64, rows: i64) -> Session {
+    var owned = Vec(String).new()
+    for arg in args {
+        match ffi.c_string(arg) {
+            Ok(text) => owned.push(text)
+            Err(message) => { println(message); panic("invalid command argument") }
+        }
+    }
+    var argv = Vec(*u8).new()
+    for text in owned { argv.push(text.as_str().ptr) }
+    argv.push(null)
+    var fd: i32 = -1
+    var size = api.Winsize { rows: rows as u16, cols: cols as u16, xpixel: 0, ypixel: 0 }
+    // Fork before GLFW or fontconfig can start library worker threads.
+    let pid = unsafe { api.forkpty(&fd, null, null, &size) }
+    if pid < 0 { panic("forkpty failed") }
+    if pid == 0 {
+        unsafe {
+            api.setenv("TERM", "banana", 1)
+            api.setenv("COLORTERM", "truecolor", 1)
+            api.execvp(argv[0], &argv[0])
+            libc.write(2, "banana: cannot execute command\r\n", 32)
+            libc._exit(127)
+        }
+    }
+    unsafe {
+        // O_NONBLOCK and FD_CLOEXEC. Queue writes instead of blocking the UI.
+        if api.fcntl(fd, 4, 0x800) < 0 || api.fcntl(fd, 2, 1) < 0 {
+            libc.close(fd)
+            api.kill(pid, 9)
+            var status: i32 = 0
+            libc.waitpid(pid, &status, 0)
+            panic("cannot configure PTY")
+        }
+    }
+    Session { fd, pid, exited: false, eof: false, status: 0, queue: String.new(), sent: 0 }
+}
+
+impl Session {
+    pub fn send(inout self, text: str) {
+        if self.eof || self.queue.len() - self.sent + text.len > 4194304 { return }
+        if self.sent > 65536 {
+            self.queue = String.from(self.queue.as_str()[self.sent..])
+            self.sent = 0
+        }
+        self.queue.push_str(text)
+    }
+
+    pub fn flush(inout self) {
+        unsafe {
+            while self.sent < self.queue.len() {
+                let text = self.queue.as_str()
+                let n = libc.write(self.fd, text.ptr + self.sent, text.len - self.sent)
+                if n > 0 { self.sent += n }
+                else if n < 0 && *libc.__errno_location() == 4 { continue }
+                else { break }
+            }
+        }
+        if self.sent == self.queue.len() { self.queue.clear(); self.sent = 0 }
+    }
+
+    pub fn receive(inout self, inout term: terminal.Terminal) {
+        var buf = [0 as u8; 16384]
+        // Limit one iteration's work so a busy child cannot starve Wayland.
+        for _ in 0..16 {
+            let n = unsafe { libc.read(self.fd, &buf[0], 16384) }
+            if n > 0 { term.feed(unsafe { make_str(&buf[0], n) }) }
+            else {
+                let err = unsafe { *libc.__errno_location() }
+                if n == 0 || (n < 0 && err == 5) { self.eof = true }
+                if n < 0 && err == 4 { continue }
+                break
+            }
+        }
+        if !self.exited {
+            let result = unsafe { libc.waitpid(self.pid, &self.status, 1) }
+            if result == self.pid { self.exited = true }
+        }
+        if !term.replies.is_empty() { self.send(term.replies.as_str()); term.replies.clear() }
+        self.flush()
+    }
+
+    pub fn resize(self, cols: i64, rows: i64, width: i32, height: i32) {
+        var size = api.Winsize { rows: rows as u16, cols: cols as u16,
+            xpixel: terminal.clamp(width as i64, 0, 65535) as u16,
+            ypixel: terminal.clamp(height as i64, 0, 65535) as u16 }
+        unsafe { api.ioctl(self.fd, 0x5414, &size) }
+    }
+
+    pub fn exit_code(self) -> i32 {
+        if self.status & 127 == 0 { (self.status >> 8) & 255 }
+        else { 128 + (self.status & 127) }
+    }
+}
+
+impl Drop for Session {
+    fn drop(inout self) {
+        unsafe {
+            libc.close(self.fd)
+            api.kill(-self.pid, 1)
+            if !self.exited {
+                api.kill(self.pid, 1)
+                for _ in 0..100 {
+                    if libc.waitpid(self.pid, &self.status, 1) == self.pid { self.exited = true; break }
+                    api.usleep(1000)
+                }
+                if !self.exited { api.kill(self.pid, 9); libc.waitpid(self.pid, &self.status, 0) }
+            }
+        }
+    }
+}

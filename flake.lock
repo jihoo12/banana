@@ -1,0 +1,49 @@
+{
+  "nodes": {
+    "jihoo": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1793095438,
+        "narHash": "sha256-D6pq4teAUKCpy36ZwP9ZyIsSS3nF7mZb1oSUmo8nQww=",
+        "owner": "jihoolang",
+        "repo": "jihoo",
+        "rev": "6c52f74d88696ecc21915b35d5c940eb141ac11f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jihoolang",
+        "repo": "jihoo",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1791456040,
+        "narHash": "sha256-H83yz/do+hjOO0uujHyH8RgtIQP2v7Mw+cLwcZK/xKc=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "e7439b6b14ad3cc35d05608ebca9bce01a25f5f8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "jihoo": "jihoo",
+        "nixpkgs": [
+          "jihoo",
+          "nixpkgs"
+        ]
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

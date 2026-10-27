@@ -1,0 +1,60 @@
+import api
+import pty
+import terminal
+
+fn check(ok: bool, message: str) { if !ok { panic(message) } }
+
+fn screen(t: terminal.Terminal) -> String {
+    var out = String.new()
+    for cell in t.cells { if cell.cp < 128 && cell.cp > 0 { out.push(cell.cp as u8) } }
+    out
+}
+
+fn main() {
+    var args = Vec(str).new()
+    args.push("sh"); args.push("-c")
+    args.push("test -t 0 && test -t 1 && test -t 2 && printf TTY_OK; stty size; printf READY; read -r line; printf 'reply:%s\\n' \"$line\"; stty size; exit 7")
+    var s = pty.spawn(args, 80, 24)
+    var t = terminal.Terminal.new(120, 20)
+    var ready = false
+    for _ in 0..5000 {
+        s.receive(&t)
+        if screen(t).as_str().contains("READY") { ready = true; break }
+        unsafe { api.usleep(1000) }
+    }
+    check(ready && screen(t).as_str().contains("TTY_OK24 80"), "child has controlling PTY and initial size")
+    s.resize(100, 30, 1000, 600)
+    s.send("hello jihoo\n")
+    for _ in 0..5000 {
+        s.receive(&t)
+        if s.eof && s.exited { break }
+        unsafe { api.usleep(1000) }
+    }
+    check(s.eof && s.exited && s.exit_code() == 7, "drain and reap child with exit status")
+    let output = screen(t)
+    check(output.as_str().contains("reply:hello jihoo") && output.as_str().contains("30 100"), "PTY input and resize ioctl")
+
+    var large_args = Vec(str).new()
+    large_args.push("sh"); large_args.push("-c")
+    large_args.push("stty raw -echo; printf READY; head -c 262144 | wc -c")
+    var large = pty.spawn(large_args, 80, 24)
+    var output_term = terminal.Terminal.new(80, 24)
+    var raw_ready = false
+    for _ in 0..5000 {
+        large.receive(&output_term)
+        if screen(output_term).as_str().contains("READY") { raw_ready = true; break }
+        unsafe { api.usleep(1000) }
+    }
+    check(raw_ready, "raw PTY ready")
+    var payload = String.with_capacity(262144)
+    for _ in 0..262144 { payload.push('a') }
+    large.send(payload.as_str())
+    for _ in 0..5000 {
+        large.receive(&output_term)
+        if large.eof && large.exited { break }
+        unsafe { api.usleep(1000) }
+    }
+    check(large.eof && large.exited && large.exit_code() == 0, "large queued PTY writes complete")
+    check(screen(output_term).as_str().contains("262144"), "partial writes preserve every byte")
+    println("pty: all checks passed")
+}

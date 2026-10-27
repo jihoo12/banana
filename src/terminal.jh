@@ -1,0 +1,452 @@
+// Streaming VT parser and cell grid. This module has no window-system dependency.
+import std.mem
+
+pub const FOREGROUND: u32 = 0xd9e2ee
+pub const BACKGROUND: u32 = 0x10151d
+pub const HISTORY_LIMIT: i64 = 2000
+
+pub fn clamp(n: i64, lo: i64, hi: i64) -> i64 {
+    if n < lo { lo } else if n > hi { hi } else { n }
+}
+
+pub fn color(index: i64) -> u32 {
+    let palette = [0x18212e as u32, 0xef7181, 0x9dcc83, 0xe8c47c,
+        0x80aaf0, 0xc69ce0, 0x79c9cf, 0xd9e2ee,
+        0x59677b, 0xff8998, 0xb9e49b, 0xf7dc99,
+        0x9bc2ff, 0xdeb8f5, 0x98e1e5, 0xf4f7fc]
+    let n = clamp(index, 0, 255)
+    if n < 16 { return palette[n] }
+    if n >= 232 {
+        let v = (8 + (n - 232) * 10) as u32
+        return v * 0x010101
+    }
+    let k = n - 16
+    let steps = [0 as u32, 95, 135, 175, 215, 255]
+    (steps[k / 36] << 16) | (steps[k / 6 % 6] << 8) | steps[k % 6]
+}
+
+pub fn char_width(cp: u32) -> i64 {
+    if (cp >= 0x300 && cp <= 0x36f) || (cp >= 0xfe00 && cp <= 0xfe0f) ||
+        (cp >= 0x200b && cp <= 0x200f) { return 0 }
+    if (cp >= 0x1100 && cp <= 0x115f) || cp == 0x2329 || cp == 0x232a ||
+        (cp >= 0x2e80 && cp <= 0xa4cf && cp != 0x303f) ||
+        (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) ||
+        (cp >= 0xfe10 && cp <= 0xfe19) || (cp >= 0xfe30 && cp <= 0xfe6f) ||
+        (cp >= 0xff01 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) ||
+        (cp >= 0x1f300 && cp <= 0x1faff) || (cp >= 0x20000 && cp <= 0x3fffd) {
+        return 2
+    }
+    1
+}
+
+#[derive(Clone)]
+pub struct Cell {
+    pub cp: u32
+    pub fg: u32
+    pub bg: u32
+    pub attrs: i64 // 1: bold, 2: underline, 4: inverse
+    pub width: i64 // 0 marks the trailing half of a wide character
+}
+
+pub fn blank() -> Cell { Cell { cp: 32, fg: FOREGROUND, bg: BACKGROUND, attrs: 0, width: 1 } }
+
+fn grid(cols: i64, rows: i64) -> Vec(Cell) {
+    var cells = Vec(Cell).with_capacity(cols * rows)
+    for _ in 0..cols * rows { cells.push(blank()) }
+    cells
+}
+
+pub struct Terminal {
+    pub cols: i64
+    pub rows: i64
+    pub cells: Vec(Cell)
+    pub history: Vec(Vec(Cell))
+    pub view: i64
+    pub x: i64
+    pub y: i64
+    pub cursor_visible: bool
+    pub application_cursor: bool
+    pub bracketed_paste: bool
+    pub alternate: bool
+    pub dirty: bool
+    pub replies: String
+    pub title: String
+    saved: Vec(Cell)
+    saved_x: i64
+    saved_y: i64
+    primary_x: i64
+    primary_y: i64
+    fg: u32
+    bg: u32
+    attrs: i64
+    top: i64
+    bottom: i64
+    wrap: bool
+    autowrap: bool
+    origin: bool
+    state: i64
+    private_mode: bool
+    args: [i64; 16]
+    arg: i64
+    osc: String
+    utf_value: u32
+    utf_min: u32
+    utf_left: i64
+}
+
+impl Terminal {
+    pub fn new(cols: i64, rows: i64) -> Terminal {
+        let c = clamp(cols, 2, 1000)
+        let r = clamp(rows, 1, 500)
+        Terminal { cols: c, rows: r, cells: grid(c, r), history: Vec(Vec(Cell)).new(),
+            view: 0, x: 0, y: 0, cursor_visible: true, application_cursor: false,
+            bracketed_paste: false, alternate: false, dirty: true,
+            replies: String.new(), title: String.new(), saved: Vec(Cell).new(),
+            saved_x: 0, saved_y: 0, primary_x: 0, primary_y: 0,
+            fg: FOREGROUND, bg: BACKGROUND, attrs: 0, top: 0, bottom: r - 1,
+            wrap: false, autowrap: true, origin: false, state: 0, private_mode: false,
+            args: [0; 16], arg: 0, osc: String.new(), utf_value: 0, utf_min: 0, utf_left: 0 }
+    }
+
+    fn empty(self) -> Cell {
+        Cell { cp: 32, fg: self.fg, bg: self.bg, attrs: 0, width: 1 }
+    }
+
+    pub fn display_cell(self, x: i64, y: i64) -> Cell {
+        let row = self.history.len() - self.view + y
+        if !self.alternate && row < self.history.len() {
+            let line = self.history[row]
+            if x < line.len() { return line[x] }
+            return blank()
+        }
+        let cy = if self.alternate { y } else { row - self.history.len() }
+        self.cells[cy * self.cols + x]
+    }
+
+    pub fn scroll_view(inout self, amount: i64) {
+        if !self.alternate {
+            self.view = clamp(self.view + amount, 0, self.history.len())
+            self.dirty = true
+        }
+    }
+
+    pub fn resize(inout self, cols: i64, rows: i64) {
+        let c = clamp(cols, 2, 1000)
+        let r = clamp(rows, 1, 500)
+        if c == self.cols && r == self.rows { return }
+        var next = grid(c, r)
+        for y in 0..clamp(self.rows, 0, r) {
+            for x in 0..clamp(self.cols, 0, c) { next[y * c + x] = self.cells[y * self.cols + x] }
+            if next[y * c + c - 1].width == 2 { next[y * c + c - 1] = blank() }
+        }
+        if self.alternate {
+            var primary = grid(c, r)
+            for y in 0..clamp(self.rows, 0, r) {
+                for x in 0..clamp(self.cols, 0, c) { primary[y * c + x] = self.saved[y * self.cols + x] }
+                if primary[y * c + c - 1].width == 2 { primary[y * c + c - 1] = blank() }
+            }
+            self.saved = primary
+        }
+        self.cells = next
+        self.cols = c
+        self.rows = r
+        self.x = clamp(self.x, 0, c - 1)
+        self.y = clamp(self.y, 0, r - 1)
+        self.top = 0
+        self.bottom = r - 1
+        self.wrap = false
+        self.dirty = true
+    }
+
+    fn erase(inout self, start: i64, end: i64) {
+        let a = clamp(start, 0, self.cells.len())
+        let b = clamp(end, a, self.cells.len())
+        if a < b {
+            if self.cells[a].width == 0 && a % self.cols > 0 { self.cells[a - 1] = self.empty() }
+            if self.cells[b - 1].width == 2 && b % self.cols > 0 { self.cells[b] = self.empty() }
+        }
+        for i in a..b { self.cells[i] = self.empty() }
+    }
+
+    fn scroll_up(inout self) {
+        if !self.alternate && self.top == 0 && self.bottom == self.rows - 1 {
+            var line = Vec(Cell).with_capacity(self.cols)
+            for x in 0..self.cols { line.push(self.cells[x]) }
+            self.history.push(line)
+            if self.view > 0 { self.view += 1 }
+            if self.history.len() > HISTORY_LIMIT { self.history.remove(0) }
+            self.view = clamp(self.view, 0, self.history.len())
+        }
+        for y in self.top..self.bottom {
+            for x in 0..self.cols { self.cells[y * self.cols + x] = self.cells[(y + 1) * self.cols + x] }
+        }
+        self.erase(self.bottom * self.cols, (self.bottom + 1) * self.cols)
+    }
+
+    fn scroll_down(inout self) {
+        var y = self.bottom
+        while y > self.top {
+            for x in 0..self.cols { self.cells[y * self.cols + x] = self.cells[(y - 1) * self.cols + x] }
+            y -= 1
+        }
+        self.erase(self.top * self.cols, (self.top + 1) * self.cols)
+    }
+
+    fn newline(inout self) {
+        self.wrap = false
+        if self.y == self.bottom { self.scroll_up() }
+        else { self.y = clamp(self.y + 1, 0, self.rows - 1) }
+    }
+
+    fn put(inout self, cp: u32) {
+        let width = char_width(cp)
+        if width == 0 { return }
+        if self.autowrap && (self.wrap || (width == 2 && self.x == self.cols - 1)) {
+            self.x = 0
+            self.newline()
+        }
+        let i = self.y * self.cols + self.x
+        self.erase(i, i + width)
+        self.cells[i] = Cell { cp, fg: self.fg, bg: self.bg, attrs: self.attrs, width }
+        if width == 2 && self.x + 1 < self.cols {
+            self.cells[i + 1] = Cell { cp: 0, fg: self.fg, bg: self.bg, attrs: self.attrs, width: 0 }
+        }
+        self.wrap = self.x + width >= self.cols
+        self.x = clamp(self.x + width, 0, self.cols - 1)
+    }
+
+    fn parameter(self, i: i64, default: i64) -> i64 {
+        if i > self.arg || self.args[i] == 0 { default } else { self.args[i] }
+    }
+
+    fn switch_screen(inout self, enabled: bool) {
+        if enabled == self.alternate { return }
+        if enabled {
+            self.primary_x = self.x
+            self.primary_y = self.y
+            self.saved = mem.replace(&self.cells, grid(self.cols, self.rows))
+            self.x = 0
+            self.y = 0
+        } else {
+            self.cells = mem.replace(&self.saved, Vec(Cell).new())
+            self.x = clamp(self.primary_x, 0, self.cols - 1)
+            self.y = clamp(self.primary_y, 0, self.rows - 1)
+        }
+        self.alternate = enabled
+        self.view = 0
+        self.top = 0
+        self.bottom = self.rows - 1
+        self.wrap = false
+    }
+
+    fn sgr(inout self) {
+        var i = 0
+        while i <= self.arg {
+            let n = self.args[i]
+            if n == 0 { self.fg = FOREGROUND; self.bg = BACKGROUND; self.attrs = 0 }
+            else if n == 1 { self.attrs |= 1 }
+            else if n == 4 { self.attrs |= 2 }
+            else if n == 7 { self.attrs |= 4 }
+            else if n == 22 { self.attrs &= 6 }
+            else if n == 24 { self.attrs &= 5 }
+            else if n == 27 { self.attrs &= 3 }
+            else if n == 39 { self.fg = FOREGROUND }
+            else if n == 49 { self.bg = BACKGROUND }
+            else if n >= 30 && n <= 37 { self.fg = color(n - 30) }
+            else if n >= 40 && n <= 47 { self.bg = color(n - 40) }
+            else if n >= 90 && n <= 97 { self.fg = color(n - 90 + 8) }
+            else if n >= 100 && n <= 107 { self.bg = color(n - 100 + 8) }
+            else if (n == 38 || n == 48) && i + 1 <= self.arg {
+                var rgb: u32 = 0
+                var valid = false
+                if self.args[i + 1] == 5 && i + 2 <= self.arg {
+                    rgb = color(self.args[i + 2]); i += 2; valid = true
+                } else if self.args[i + 1] == 2 && i + 4 <= self.arg {
+                    rgb = (clamp(self.args[i + 2], 0, 255) as u32 << 16) |
+                        (clamp(self.args[i + 3], 0, 255) as u32 << 8) |
+                        clamp(self.args[i + 4], 0, 255) as u32
+                    i += 4; valid = true
+                }
+                if valid { if n == 38 { self.fg = rgb } else { self.bg = rgb } }
+            }
+            i += 1
+        }
+    }
+
+    fn csi(inout self, final: u8) {
+        let n = clamp(self.parameter(0, 1), 1, 1000)
+        let pos = self.y * self.cols + self.x
+        self.wrap = false
+        if self.private_mode {
+            if final == 'h' || final == 'l' {
+                let enabled = final == 'h'
+                for i in 0..self.arg + 1 {
+                    let mode = self.args[i]
+                    if mode == 1 { self.application_cursor = enabled }
+                    else if mode == 6 { self.origin = enabled; self.x = 0; self.y = if enabled { self.top } else { 0 } }
+                    else if mode == 7 { self.autowrap = enabled }
+                    else if mode == 25 { self.cursor_visible = enabled }
+                    else if mode == 47 || mode == 1047 || mode == 1049 { self.switch_screen(enabled) }
+                    else if mode == 2004 { self.bracketed_paste = enabled }
+                }
+            }
+            return
+        }
+        if final == 'm' { self.sgr() }
+        else if final == 'A' { self.y -= n }
+        else if final == 'B' || final == 'e' { self.y += n }
+        else if final == 'C' || final == 'a' { self.x += n }
+        else if final == 'D' { self.x -= n }
+        else if final == 'E' { self.y += n; self.x = 0 }
+        else if final == 'F' { self.y -= n; self.x = 0 }
+        else if final == 'G' || final == '`' { self.x = n - 1 }
+        else if final == 'd' { self.y = n - 1 + if self.origin { self.top } else { 0 } }
+        else if final == 'H' || final == 'f' {
+            self.y = self.parameter(0, 1) - 1 + if self.origin { self.top } else { 0 }
+            self.x = self.parameter(1, 1) - 1
+        } else if final == 'J' {
+            let mode = self.args[0]
+            if mode == 0 { self.erase(pos, self.cells.len()) }
+            else if mode == 1 { self.erase(0, pos + 1) }
+            else if mode == 2 { self.erase(0, self.cells.len()) }
+            else if mode == 3 { self.history.clear(); self.view = 0 }
+        } else if final == 'K' {
+            let start = self.y * self.cols
+            if self.args[0] == 0 { self.erase(pos, start + self.cols) }
+            else if self.args[0] == 1 { self.erase(start, pos + 1) }
+            else if self.args[0] == 2 { self.erase(start, start + self.cols) }
+        } else if final == 'X' { self.erase(pos, pos + clamp(n, 0, self.cols - self.x)) }
+        else if final == 'P' || final == '@' {
+            let count = clamp(n, 0, self.cols - self.x)
+            let end = (self.y + 1) * self.cols
+            if final == 'P' {
+                for i in pos..end - count { self.cells[i] = self.cells[i + count] }
+                self.erase(end - count, end)
+            } else {
+                var i = end - 1
+                while i >= pos + count { self.cells[i] = self.cells[i - count]; i -= 1 }
+                self.erase(pos, pos + count)
+            }
+        } else if final == 'L' || final == 'M' {
+            if self.y >= self.top && self.y <= self.bottom {
+                let top = self.top
+                self.top = self.y
+                for _ in 0..clamp(n, 0, self.bottom - self.y + 1) {
+                    if final == 'L' { self.scroll_down() } else { self.scroll_up() }
+                }
+                self.top = top
+            }
+        } else if final == 'S' || final == 'T' {
+            for _ in 0..clamp(n, 0, self.bottom - self.top + 1) {
+                if final == 'S' { self.scroll_up() } else { self.scroll_down() }
+            }
+        } else if final == 'r' {
+            let top = self.parameter(0, 1) - 1
+            let bottom = self.parameter(1, self.rows) - 1
+            if top >= 0 && bottom < self.rows && top < bottom {
+                self.top = top; self.bottom = bottom; self.x = 0
+                self.y = if self.origin { top } else { 0 }
+            }
+        } else if final == 's' { self.saved_x = self.x; self.saved_y = self.y }
+        else if final == 'u' { self.x = self.saved_x; self.y = self.saved_y }
+        else if final == 'n' {
+            if self.args[0] == 5 { self.replies.push_str("\x1b[0n") }
+            else if self.args[0] == 6 {
+                self.replies.push_str("\x1b[")
+                (self.y + 1).show(&self.replies)
+                self.replies.push(';')
+                (self.x + 1).show(&self.replies)
+                self.replies.push('R')
+            }
+        } else if final == 'c' { self.replies.push_str("\x1b[?1;2c") }
+        self.x = clamp(self.x, 0, self.cols - 1)
+        self.y = clamp(self.y, if self.origin { self.top } else { 0 }, if self.origin { self.bottom } else { self.rows - 1 })
+    }
+
+    fn finish_osc(inout self) {
+        let s = self.osc.as_str()
+        if s.starts_with("0;") || s.starts_with("2;") {
+            self.title = String.from(s[2..])
+        }
+        self.osc.clear()
+        self.state = 0
+    }
+
+    fn byte(inout self, b: u8) {
+        // CAN and SUB cancel an incomplete escape sequence or UTF-8 scalar.
+        if b == 0x18 || b == 0x1a { self.state = 0; self.utf_left = 0; return }
+        if self.state == 3 || self.state == 4 {
+            if b == 7 || (self.state == 4 && b == '\\') { self.finish_osc() }
+            else if b == 27 { self.state = 4 }
+            else { self.state = 3; if b >= 32 && b != 127 && self.osc.len() < 4096 { self.osc.push(b) } }
+            return
+        }
+        if self.state == 6 || self.state == 7 {
+            if self.state == 7 && b == '\\' { self.state = 0 }
+            else { self.state = if b == 27 { 7 } else { 6 } }
+            return
+        }
+        if b == 27 { self.state = 1; self.utf_left = 0; return }
+        if b < 32 {
+            if b == 13 { self.x = 0; self.wrap = false }
+            else if b == 10 || b == 11 || b == 12 { self.newline() }
+            else if b == 8 { self.x = clamp(self.x - 1, 0, self.cols - 1); self.wrap = false }
+            else if b == 9 { self.x = clamp((self.x / 8 + 1) * 8, 0, self.cols - 1); self.wrap = false }
+            return
+        }
+        if self.state == 5 { self.state = 0; return }
+        if self.state == 1 {
+            self.state = 0
+            if b == '[' { self.state = 2; self.args = [0; 16]; self.arg = 0; self.private_mode = false }
+            else if b == ']' { self.state = 3; self.osc.clear() }
+            else if b == 'P' || b == '_' || b == '^' { self.state = 6 }
+            else if b == '(' || b == ')' || b == '*' || b == '+' || b == '%' { self.state = 5 }
+            else if b == '7' { self.saved_x = self.x; self.saved_y = self.y }
+            else if b == '8' { self.x = clamp(self.saved_x, 0, self.cols - 1); self.y = clamp(self.saved_y, 0, self.rows - 1); self.wrap = false }
+            else if b == 'D' { self.newline() }
+            else if b == 'E' { self.x = 0; self.newline() }
+            else if b == 'M' { if self.y == self.top { self.scroll_down() } else { self.y = clamp(self.y - 1, 0, self.rows - 1) } }
+            else if b == 'c' {
+                self.switch_screen(false)
+                self.fg = FOREGROUND; self.bg = BACKGROUND; self.attrs = 0
+                self.x = 0; self.y = 0; self.top = 0; self.bottom = self.rows - 1
+                self.autowrap = true; self.origin = false; self.wrap = false
+                self.cursor_visible = true; self.application_cursor = false; self.bracketed_paste = false
+                self.erase(0, self.cells.len())
+            }
+            return
+        }
+        if self.state == 2 {
+            if b >= '0' && b <= '9' { self.args[self.arg] = clamp(self.args[self.arg] * 10 + (b - '0') as i64, 0, 100000) }
+            else if b == ';' || b == ':' { if self.arg < 15 { self.arg += 1 } }
+            else if b == '?' { self.private_mode = true }
+            else if b >= 0x40 && b <= 0x7e { self.csi(b); self.state = 0 }
+            return
+        }
+        if b == 127 { return }
+        if self.utf_left > 0 {
+            if b >= 0x80 && b <= 0xbf {
+                self.utf_value = (self.utf_value << 6) | (b & 0x3f) as u32
+                self.utf_left -= 1
+                if self.utf_left == 0 {
+                    let cp = self.utf_value
+                    if cp < self.utf_min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) { self.put(0xfffd) }
+                    else { self.put(cp) }
+                }
+                return
+            }
+            self.utf_left = 0
+            self.put(0xfffd)
+        }
+        if b < 0x80 { self.put(b as u32) }
+        else if b >= 0xc2 && b <= 0xdf { self.utf_value = (b & 31) as u32; self.utf_min = 0x80; self.utf_left = 1 }
+        else if b >= 0xe0 && b <= 0xef { self.utf_value = (b & 15) as u32; self.utf_min = 0x800; self.utf_left = 2 }
+        else if b >= 0xf0 && b <= 0xf4 { self.utf_value = (b & 7) as u32; self.utf_min = 0x10000; self.utf_left = 3 }
+        else { self.put(0xfffd) }
+    }
+
+    pub fn feed(inout self, bytes: str) {
+        for b in bytes { self.byte(b) }
+        self.dirty = true
+    }
+}

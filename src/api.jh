@@ -1,0 +1,92 @@
+// Linux C ABI: opaque GLFW/FreeType objects stay behind raw handles.
+pub extern fn glfwInitHint(hint: i32, value: i32)
+pub extern fn glfwInit() -> i32
+pub extern fn glfwTerminate()
+pub extern fn glfwWindowHint(hint: i32, value: i32)
+pub extern fn glfwCreateWindow(w: i32, h: i32, title: *u8, monitor: *u8, share: *u8) -> *u8
+pub extern fn glfwDestroyWindow(window: *u8)
+pub extern fn glfwMakeContextCurrent(window: *u8)
+pub extern fn glfwSwapInterval(interval: i32)
+pub extern fn glfwSwapBuffers(window: *u8)
+pub extern fn glfwWaitEventsTimeout(timeout: f64)
+pub extern fn glfwWindowShouldClose(window: *u8) -> i32
+pub extern fn glfwSetWindowShouldClose(window: *u8, value: i32)
+pub extern fn glfwGetFramebufferSize(window: *u8, w: *i32, h: *i32)
+pub extern fn glfwGetWindowContentScale(window: *u8, x: *f32, y: *f32)
+pub extern fn glfwSetWindowTitle(window: *u8, title: *u8)
+pub extern fn glfwSetWindowUserPointer(window: *u8, ptr: *u8)
+pub extern fn glfwGetWindowUserPointer(window: *u8) -> *u8
+pub extern fn glfwSetKeyCallback(window: *u8, cb: fnptr(*u8, i32, i32, i32, i32)) -> *u8
+pub extern fn glfwSetCharCallback(window: *u8, cb: fnptr(*u8, u32)) -> *u8
+pub extern fn glfwSetScrollCallback(window: *u8, cb: fnptr(*u8, f64, f64)) -> *u8
+pub extern fn glfwSetErrorCallback(cb: fnptr(i32, *u8)) -> *u8
+pub extern fn glfwGetClipboardString(window: *u8) -> *u8
+pub extern fn glfwGetTime() -> f64
+pub extern fn glfwGetKey(window: *u8, key: i32) -> i32
+pub extern fn glfwWindowHintString(hint: i32, value: *u8)
+pub extern fn readlink(path: *u8, buf: *u8, length: u64) -> i64
+
+pub extern fn glViewport(x: i32, y: i32, w: i32, h: i32)
+pub extern fn glClearColor(r: f32, g: f32, b: f32, a: f32)
+pub extern fn glClear(mask: u32)
+pub extern fn glEnable(cap: u32)
+pub extern fn glBlendFunc(src: u32, dst: u32)
+pub extern fn glCreateShader(kind: u32) -> u32
+pub extern fn glShaderSource(shader: u32, count: i32, sources: **u8, lengths: *i32)
+pub extern fn glCompileShader(shader: u32)
+pub extern fn glGetShaderiv(shader: u32, name: u32, value: *i32)
+pub extern fn glGetShaderInfoLog(shader: u32, length: i32, used: *i32, log: *u8)
+pub extern fn glDeleteShader(shader: u32)
+pub extern fn glCreateProgram() -> u32
+pub extern fn glAttachShader(program: u32, shader: u32)
+pub extern fn glLinkProgram(program: u32)
+pub extern fn glGetProgramiv(program: u32, name: u32, value: *i32)
+pub extern fn glGetProgramInfoLog(program: u32, length: i32, used: *i32, log: *u8)
+pub extern fn glUseProgram(program: u32)
+pub extern fn glDeleteProgram(program: u32)
+pub extern fn glGetUniformLocation(program: u32, name: *u8) -> i32
+pub extern fn glUniform2f(location: i32, x: f32, y: f32)
+pub extern fn glGenVertexArrays(n: i32, arrays: *u32)
+pub extern fn glBindVertexArray(array: u32)
+pub extern fn glDeleteVertexArrays(n: i32, arrays: *u32)
+pub extern fn glGenBuffers(n: i32, buffers: *u32)
+pub extern fn glBindBuffer(target: u32, buffer: u32)
+pub extern fn glBufferData(target: u32, size: i64, data: *u8, usage: u32)
+pub extern fn glDeleteBuffers(n: i32, buffers: *u32)
+pub extern fn glEnableVertexAttribArray(index: u32)
+pub extern fn glVertexAttribPointer(index: u32, size: i32, kind: u32, normalized: u8, stride: i32, ptr: *u8)
+pub extern fn glGenTextures(n: i32, textures: *u32)
+pub extern fn glBindTexture(target: u32, texture: u32)
+pub extern fn glTexParameteri(target: u32, name: u32, value: i32)
+pub extern fn glPixelStorei(name: u32, value: i32)
+pub extern fn glTexImage2D(target: u32, level: i32, internal: i32, w: i32, h: i32, border: i32, format: u32, kind: u32, pixels: *u8)
+pub extern fn glTexSubImage2D(target: u32, level: i32, x: i32, y: i32, w: i32, h: i32, format: u32, kind: u32, pixels: *u8)
+pub extern fn glDrawArrays(mode: u32, first: i32, count: i32)
+pub extern fn glDeleteTextures(n: i32, textures: *u32)
+pub extern fn glReadPixels(x: i32, y: i32, w: i32, h: i32, format: u32, kind: u32, pixels: *u8)
+pub extern fn glGetError() -> u32
+pub extern fn glGetString(name: u32) -> *u8
+
+pub struct FontGlyph {
+    pub pixels: *u8
+    pub width: i32
+    pub height: i32
+    pub left: i32
+    pub top: i32
+}
+pub extern fn banana_font_open(family: *u8, size: i32) -> *u8
+pub extern fn banana_font_width(font: *u8) -> i32
+pub extern fn banana_font_ascent(font: *u8) -> i32
+pub extern fn banana_font_glyph(font: *u8, cp: u32) -> FontGlyph
+pub extern fn banana_char_width(cp: u32) -> i32
+pub extern fn banana_font_close(font: *u8)
+
+pub struct Winsize { pub rows: u16, pub cols: u16, pub xpixel: u16, pub ypixel: u16 }
+pub extern fn forkpty(master: *i32, name: *u8, termios: *u8, size: *Winsize) -> i32
+pub extern fn ioctl(fd: i32, request: u64, ...) -> i32
+pub extern fn fcntl(fd: i32, cmd: i32, ...) -> i32
+pub extern fn execvp(file: *u8, args: **u8) -> i32
+pub extern fn setenv(name: *u8, value: *u8, overwrite: i32) -> i32
+pub extern fn kill(pid: i32, signal: i32) -> i32
+pub extern fn signal(signal: i32, handler: *u8) -> *u8
+pub extern fn usleep(usec: u32) -> i32

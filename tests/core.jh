@@ -1,0 +1,76 @@
+import terminal
+import input
+
+fn check(ok: bool, message: str) { if !ok { panic(message) } }
+
+fn main() {
+    check(input.key_sequence(67, 2, false).as_str() == "\x03", "Ctrl+C")
+    check(input.key_sequence(265, 0, true).as_str() == "\x1bOA", "application cursor input")
+    check(input.key_sequence(263, 2, false).as_str() == "\x1b[1;5D", "modified arrow input")
+    check(input.paste("hello\x1b[201~\n", true).as_str() == "\x1b[200~hello[201~\n\x1b[201~", "bracketed paste framing")
+    check(input.paste("one\ntwo", false).as_str() == "one\rtwo", "plain paste newlines")
+    var encoded = String.new()
+    input.utf8(&encoded, 0xac00)
+    check(encoded.as_str() == "가", "UTF-8 input encoding")
+    var t = terminal.Terminal.new(12, 4)
+    t.feed("hello\r\nworld")
+    check(t.cells[0].cp == 'h' as u32 && t.cells[12].cp == 'w' as u32, "CR/LF")
+    t.feed("\x1b[2;3H\x1b[38;2;255;100;20mX")
+    check(t.cells[14].cp == 'X' as u32 && t.cells[14].fg == 0xff6414, "cursor and truecolor")
+    t.feed("\x1b[0m\x1b[2K")
+    check(t.cells[12].cp == 32 && t.cells[14].cp == 32, "erase line")
+    t.feed("\x1b[3;1H\xea\xb0")
+    t.feed("\x80Z")
+    check(t.cells[24].cp == 0xac00 && t.cells[24].width == 2 && t.cells[25].width == 0, "split UTF-8 / Hangul width")
+    check(t.cells[26].cp == 'Z' as u32, "wide character advances cursor")
+    t.feed("\x1b[?1049hALT")
+    check(t.alternate && t.cells[0].cp == 'A' as u32, "alternate screen")
+    t.resize(14, 5)
+    t.feed("\x1b[?1049l")
+    check(!t.alternate && t.cells[28].cp == 0xac00, "primary screen survives resize")
+    t.feed("\x1b[6n")
+    check(t.replies.as_str() == "\x1b[3;4R", "cursor report")
+    t.feed("\x1b]2;banana title\x1b\\")
+    check(t.title.as_str() == "banana title", "OSC title")
+    t.feed("\x1b]2;safe\0title\x07")
+    check(t.title.as_str() == "safetitle", "OSC strips C control bytes")
+    t.feed("\x1b[?2004h\x1b[?25l")
+    check(t.bracketed_paste && !t.cursor_visible, "private modes")
+
+    var wrap = terminal.Terminal.new(4, 2)
+    wrap.feed("abcd\rZ")
+    check(wrap.cells[0].cp == 'Z' as u32 && wrap.y == 0, "CR cancels deferred wrap")
+    wrap.feed("\x1b[H123456789")
+    check(wrap.history.len() == 1 && wrap.cells[0].cp == '5' as u32, "autowrap and scrollback")
+    wrap.scroll_view(1)
+    check(wrap.display_cell(0, 0).cp == '1' as u32, "scrollback viewport")
+    wrap.feed("\x1b[3J")
+    check(wrap.history.is_empty() && wrap.view == 0, "clear history")
+    wrap.feed("\x1b[2J\x1b[H\xf0\x80\x80\x80A")
+    check(wrap.cells[0].cp == 0xfffd && wrap.cells[1].cp == 'A' as u32, "reject overlong UTF-8")
+    wrap.feed("\x1bPignored data\x1b\\B")
+    check(wrap.cells[2].cp == 'B' as u32, "ignore DCS payload")
+
+    var region = terminal.Terminal.new(6, 4)
+    region.feed("top\x1b[4;1Hbottom\x1b[2;3r\x1b[3;1Hx\n")
+    check(region.cells[0].cp == 't' as u32 && region.cells[18].cp == 'b' as u32, "scroll region preserves outside rows")
+    region.feed("\x1b[1;4r\x1b[Habcde\x1b[1;2H\x1b[2P")
+    check(region.cells[1].cp == 'd' as u32, "delete characters")
+    region.feed("\x1b[2@")
+    check(region.cells[1].cp == 32 && region.cells[3].cp == 'd' as u32, "insert characters")
+    for _ in 0..2100 { region.feed("\r\n") }
+    check(region.history.len() == terminal.HISTORY_LIMIT, "bounded history")
+
+    // Every possible byte and long hostile sequences must remain bounded.
+    var fuzz = terminal.Terminal.new(20, 6)
+    var bytes = String.new()
+    var seed: u64 = 42
+    for _ in 0..50000 {
+        seed = seed *% 6364136223846793005 +% 1
+        bytes.push((seed >> 32) as u8)
+    }
+    fuzz.feed(bytes.as_str())
+    fuzz.feed("\x18\x1b[999999999999999999999999999999;999999999999H")
+    check(fuzz.x >= 0 && fuzz.x < fuzz.cols && fuzz.y >= 0 && fuzz.y < fuzz.rows, "parser bounds")
+    println("terminal: all checks passed")
+}
