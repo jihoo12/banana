@@ -1,4 +1,13 @@
 // GLFW key numbers -> terminal escape sequences. No platform calls here.
+// Cursor positions use window coordinates; glyph geometry uses framebuffer pixels.
+pub fn mouse_coordinate(position: f64, window_size: i32, framebuffer_size: i32,
+    padding: i64, cell_size: i64, limit: i64, boundary: bool) -> i64 {
+    if window_size <= 0 || framebuffer_size <= 0 || cell_size <= 0 { return 0 }
+    let pixels = position * framebuffer_size as f64 / window_size as f64
+    let value = ((pixels - padding as f64) / cell_size as f64 + (if boundary { 0.5 } else { 0.0 })) as i64
+    if value < 0 { 0 } else if value > limit { limit } else { value }
+}
+
 pub fn utf8(inout text: String, cp: u32) {
     if cp <= 0x7f { text.push(cp as u8) }
     else if cp <= 0x7ff {

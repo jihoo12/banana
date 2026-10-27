@@ -9,7 +9,43 @@ import std.fs
 import std.libc
 import std.sys
 
-struct App { term: terminal.Terminal, session: pty.Session }
+struct App {
+    term: terminal.Terminal
+    session: pty.Session
+    cell_width: i64
+    cell_height: i64
+    padding: i64
+}
+
+unsafe fn mouse_selection(window: *u8, start: bool) {
+    let app = api.glfwGetWindowUserPointer(window) as *App
+    if app == null { return }
+    if !start && !(*app).term.selecting { return }
+    var x: f64 = 0.0; var y: f64 = 0.0
+    var ww: i32 = 0; var wh: i32 = 0
+    var fw: i32 = 0; var fh: i32 = 0
+    api.glfwGetCursorPos(window, &x, &y)
+    api.glfwGetWindowSize(window, &ww, &wh)
+    api.glfwGetFramebufferSize(window, &fw, &fh)
+    let col = input.mouse_coordinate(x, ww, fw, (*app).padding, (*app).cell_width, (*app).term.cols, true)
+    let row = input.mouse_coordinate(y, wh, fh, (*app).padding, (*app).cell_height, (*app).term.rows - 1, false)
+    if start { (*app).term.start_selection(col, row) }
+    else { (*app).term.update_selection(col, row) }
+}
+
+export fn on_mouse_button(window: *u8, button: i32, action: i32, mods: i32) {
+    if button != 0 { return } // Left mouse button.
+    unsafe {
+        let app = api.glfwGetWindowUserPointer(window) as *App
+        if app == null { return }
+        mouse_selection(window, action == 1)
+        if action == 0 { (*app).term.selecting = false }
+    }
+}
+
+export fn on_mouse_move(window: *u8, x: f64, y: f64) {
+    unsafe { mouse_selection(window, false) }
+}
 
 export fn on_error(code: i32, message: *u8) {
     unsafe {
@@ -28,6 +64,7 @@ export fn on_char(window: *u8, cp: u32) {
         if api.glfwGetKey(window, 342) != 0 || api.glfwGetKey(window, 346) != 0 { text.push(27) }
         input.utf8(&text, cp)
         (*app).session.send(text.as_str())
+        (*app).term.clear_selection()
         (*app).term.view = 0; (*app).term.dirty = true
     }
 }
@@ -37,8 +74,17 @@ export fn on_key(window: *u8, key: i32, scancode: i32, action: i32, mods: i32) {
     unsafe {
         let app = api.glfwGetWindowUserPointer(window) as *App
         if app == null { return }
+        if (mods & 3 == 3 && key == 67) || (mods & 2 != 0 && key == 260) {
+            if (*app).term.has_selection() {
+                let text = (*app).term.selection_text()
+                let clip = ffi.c_string(text.as_str()).unwrap()
+                api.glfwSetClipboardString(window, clip.as_str().ptr)
+            }
+            return
+        }
         if mods & 1 != 0 && (key == 266 || key == 267) {
             (*app).term.scroll_view(if key == 266 { (*app).term.rows / 2 } else { 0 - (*app).term.rows / 2 })
+            mouse_selection(window, false)
             return
         }
         if (mods & 3 == 3 && key == 86) || (mods & 1 != 0 && key == 260) {
@@ -47,19 +93,27 @@ export fn on_key(window: *u8, key: i32, scancode: i32, action: i32, mods: i32) {
                 let text = ffi.copy_c_string(clip)
                 let pasted = input.paste(text.as_str(), (*app).term.bracketed_paste)
                 (*app).session.send(pasted.as_str())
+                (*app).term.clear_selection()
+                (*app).term.view = 0; (*app).term.dirty = true
             }
         } else {
             let seq = input.key_sequence(key, mods, (*app).term.application_cursor)
-            (*app).session.send(seq.as_str())
+            if !seq.is_empty() {
+                (*app).session.send(seq.as_str())
+                (*app).term.clear_selection()
+                (*app).term.view = 0; (*app).term.dirty = true
+            }
         }
-        (*app).term.view = 0; (*app).term.dirty = true
     }
 }
 
 export fn on_scroll(window: *u8, dx: f64, dy: f64) {
     unsafe {
         let app = api.glfwGetWindowUserPointer(window) as *App
-        if app != null { (*app).term.scroll_view((dy * 3.0) as i64) }
+        if app != null {
+            (*app).term.scroll_view((dy * 3.0) as i64)
+            mouse_selection(window, false)
+        }
     }
 }
 
@@ -90,6 +144,7 @@ fn run() -> i32 {
             println("Banana — a Wayland OpenGL terminal written in jihoo")
             println("Usage: banana [--font FAMILY] [--font-size PIXELS] [-e|-- COMMAND ARG...]")
             println("       banana --smoke-test OUTPUT.ppm")
+            println("Mouse: left-drag to select. Ctrl+Shift+C / Ctrl+Insert copy.")
             println("Keys: Ctrl+Shift+V / Shift+Insert paste; Shift+PageUp/PageDown or wheel scroll.")
             return 0
         } else if arg == "--font" || arg == "--font-size" || arg == "--smoke-test" {
@@ -120,7 +175,8 @@ fn run() -> i32 {
         }
     }
     configure_terminfo()
-    var app = App { term: terminal.Terminal.new(80, 24), session: pty.spawn(command, 80, 24) }
+    var app = App { term: terminal.Terminal.new(80, 24), session: pty.spawn(command, 80, 24),
+        cell_width: 1, cell_height: 1, padding: 0 }
     unsafe {
         api.glfwSetErrorCallback(on_error)
         api.glfwInitHint(0x00050003, 0x00060003) // GLFW_PLATFORM_WAYLAND
@@ -137,13 +193,17 @@ fn run() -> i32 {
         api.glfwSetWindowUserPointer(window, &app as *u8)
         api.glfwSetCharCallback(window, on_char); api.glfwSetKeyCallback(window, on_key)
         api.glfwSetScrollCallback(window, on_scroll)
+        api.glfwSetCursorPosCallback(window, on_mouse_move)
+        api.glfwSetMouseButtonCallback(window, on_mouse_button)
         var scale: f32 = 1.0; var scale_y: f32 = 1.0
         api.glfwGetWindowContentScale(window, &scale, &scale_y)
         var render = renderer.Renderer.new(family, font_size, scale)
+        app.cell_width = render.cell_width; app.cell_height = render.cell_height; app.padding = render.padding
         var old_width: i32 = 0; var old_height: i32 = 0
         var last_cursor = true
         let started = api.glfwGetTime()
         var captured = false
+        var smoke_selected = false
         var rendered_frames: i64 = 0
         while api.glfwWindowShouldClose(window) == 0 {
             app.session.receive(&app.term)
@@ -158,6 +218,8 @@ fn run() -> i32 {
             api.glfwGetWindowContentScale(window, &next_scale, &scale_y)
             if next_scale != scale {
                 render = renderer.Renderer.new(family, font_size, next_scale)
+                app.term.clear_selection()
+                app.cell_width = render.cell_width; app.cell_height = render.cell_height; app.padding = render.padding
                 scale = next_scale; old_width = 0
             }
             if width > 0 && height > 0 {
@@ -174,6 +236,12 @@ fn run() -> i32 {
                 if cursor != last_cursor { app.term.dirty = true; last_cursor = cursor }
                 if smoke.len > 0 && !captured { app.term.dirty = true }
                 if app.term.dirty {
+                    if smoke.len > 0 && app.session.eof && !smoke_selected {
+                        app.term.start_selection(0, 0)
+                        app.term.update_selection(6, 0)
+                        app.term.selecting = false
+                        smoke_selected = true
+                    }
                     render.draw(app.term, width, height, cursor)
                     let error = api.glGetError()
                     if error != 0 { panic("OpenGL rendering error") }

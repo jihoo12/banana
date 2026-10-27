@@ -1,5 +1,6 @@
 // Streaming VT parser and cell grid. This module has no window-system dependency.
 import std.mem
+import input
 
 pub const FOREGROUND: u32 = 0xd9e2ee
 pub const BACKGROUND: u32 = 0x10151d
@@ -56,6 +57,8 @@ fn grid(cols: i64, rows: i64) -> Vec(Cell) {
     cells
 }
 
+struct Position { x: i64, row: i64 }
+
 pub struct Terminal {
     pub cols: i64
     pub rows: i64
@@ -71,6 +74,15 @@ pub struct Terminal {
     pub dirty: bool
     pub replies: String
     pub title: String
+    pub selecting: bool
+    selection_active: bool
+    selection_anchor: Position
+    selection_head: Position
+    history_origin: i64
+    // Zero marks a hard line end; otherwise this is the soft-wrap column.
+    wrapped: Vec(i64)
+    history_wrapped: Vec(i64)
+    saved_wrapped: Vec(i64)
     saved: Vec(Cell)
     saved_x: i64
     saved_y: i64
@@ -102,6 +114,10 @@ impl Terminal {
             view: 0, x: 0, y: 0, cursor_visible: true, application_cursor: false,
             bracketed_paste: false, alternate: false, dirty: true,
             replies: String.new(), title: String.new(), saved: Vec(Cell).new(),
+            selecting: false, selection_active: false,
+            selection_anchor: Position { x: 0, row: 0 }, selection_head: Position { x: 0, row: 0 },
+            history_origin: 0, wrapped: Vec(i64).filled(r, 0),
+            history_wrapped: Vec(i64).new(), saved_wrapped: Vec(i64).new(),
             saved_x: 0, saved_y: 0, primary_x: 0, primary_y: 0,
             fg: FOREGROUND, bg: BACKGROUND, attrs: 0, top: 0, bottom: r - 1,
             wrap: false, autowrap: true, origin: false, state: 0, private_mode: false,
@@ -113,14 +129,93 @@ impl Terminal {
     }
 
     pub fn display_cell(self, x: i64, y: i64) -> Cell {
-        let row = self.history.len() - self.view + y
+        self.row_cell(x, self.display_row(y))
+    }
+
+    fn display_row(self, y: i64) -> i64 {
+        self.history_origin + self.history.len() - (if self.alternate { 0 } else { self.view }) + y
+    }
+
+    fn row_cell(self, x: i64, absolute_row: i64) -> Cell {
+        let row = absolute_row - self.history_origin
         if !self.alternate && row < self.history.len() {
             let line = self.history[row]
             if x < line.len() { return line[x] }
             return blank()
         }
-        let cy = if self.alternate { y } else { row - self.history.len() }
+        let cy = row - self.history.len()
         self.cells[cy * self.cols + x]
+    }
+
+    pub fn clear_selection(inout self) {
+        self.selection_active = false
+        self.selecting = false
+        self.dirty = true
+    }
+
+    pub fn start_selection(inout self, x: i64, y: i64) {
+        let point = Position { x: clamp(x, 0, self.cols), row: self.display_row(clamp(y, 0, self.rows - 1)) }
+        self.selection_anchor = point
+        self.selection_head = point
+        self.selection_active = true
+        self.selecting = true
+        self.dirty = true
+    }
+
+    pub fn update_selection(inout self, x: i64, y: i64) {
+        if !self.selecting { return }
+        self.selection_head = Position { x: clamp(x, 0, self.cols), row: self.display_row(clamp(y, 0, self.rows - 1)) }
+        self.dirty = true
+    }
+
+    pub fn has_selection(self) -> bool {
+        self.selection_active && (self.selection_anchor.x != self.selection_head.x ||
+            self.selection_anchor.row != self.selection_head.row)
+    }
+
+    fn selection_bounds(self) -> (Position, Position) {
+        let a = self.selection_anchor
+        let b = self.selection_head
+        var first = if a.row < b.row || (a.row == b.row && a.x <= b.x) { a } else { b }
+        var last = if a.row < b.row || (a.row == b.row && a.x <= b.x) { b } else { a }
+        if first.x > 0 && first.x < self.cols && self.row_cell(first.x, first.row).width == 0 { first.x -= 1 }
+        if last.x > 0 && last.x < self.cols && self.row_cell(last.x, last.row).width == 0 { last.x += 1 }
+        (first, last)
+    }
+
+    pub fn is_selected(self, x: i64, y: i64) -> bool {
+        if !self.has_selection() { return false }
+        let (first, last) = self.selection_bounds()
+        let row = self.display_row(y)
+        if row < first.row || row > last.row { return false }
+        let left = if row == first.row { first.x } else { 0 }
+        let right = if row == last.row { last.x } else { self.cols }
+        x >= left && x < right
+    }
+
+    pub fn selection_text(self) -> String {
+        var text = String.new()
+        if !self.has_selection() { return text }
+        let (first, last) = self.selection_bounds()
+        for row in first.row..last.row + 1 {
+            let left = if row == first.row { first.x } else { 0 }
+            var right = if row == last.row { last.x } else { self.cols }
+            let index = row - self.history_origin
+            let wrap_column = if index < self.history.len() { self.history_wrapped[index] }
+                else { self.wrapped[index - self.history.len()] }
+            let soft = wrap_column > 0
+            if soft && right > wrap_column { right = wrap_column }
+            // Preserve spaces inside wrapped logical lines, trim line-end padding.
+            if !soft || row == last.row {
+                while right > left && self.row_cell(right - 1, row).cp == 32 { right -= 1 }
+            }
+            for x in left..right {
+                let cell = self.row_cell(x, row)
+                if cell.width != 0 { input.utf8(&text, cell.cp) }
+            }
+            if row < last.row && !soft { text.push('\n') }
+        }
+        text
     }
 
     pub fn scroll_view(inout self, amount: i64) {
@@ -134,12 +229,21 @@ impl Terminal {
         let c = clamp(cols, 2, 1000)
         let r = clamp(rows, 1, 500)
         if c == self.cols && r == self.rows { return }
+        self.clear_selection()
+        var next_wrapped = Vec(i64).filled(r, 0)
+        if c == self.cols {
+            for y in 0..clamp(self.rows, 0, r) { next_wrapped[y] = self.wrapped[y] }
+        } else {
+            for y in 0..self.history_wrapped.len() { self.history_wrapped[y] = 0 }
+        }
         var next = grid(c, r)
         for y in 0..clamp(self.rows, 0, r) {
             for x in 0..clamp(self.cols, 0, c) { next[y * c + x] = self.cells[y * self.cols + x] }
             if next[y * c + c - 1].width == 2 { next[y * c + c - 1] = blank() }
         }
         if self.alternate {
+            self.saved_wrapped.resize(r, 0)
+            if c != self.cols { for y in 0..r { self.saved_wrapped[y] = 0 } }
             var primary = grid(c, r)
             for y in 0..clamp(self.rows, 0, r) {
                 for x in 0..clamp(self.cols, 0, c) { primary[y * c + x] = self.saved[y * self.cols + x] }
@@ -148,6 +252,7 @@ impl Terminal {
             self.saved = primary
         }
         self.cells = next
+        self.wrapped = next_wrapped
         self.cols = c
         self.rows = r
         self.x = clamp(self.x, 0, c - 1)
@@ -158,12 +263,23 @@ impl Terminal {
         self.dirty = true
     }
 
+    fn invalidate_selection(inout self, start: i64, end: i64) {
+        if !self.has_selection() { return }
+        let (first, last) = self.selection_bounds()
+        let base = (self.history_origin + self.history.len()) * self.cols
+        if base + start < last.row * self.cols + last.x && base + end > first.row * self.cols + first.x {
+            self.clear_selection()
+        }
+    }
+
     fn erase(inout self, start: i64, end: i64) {
         let a = clamp(start, 0, self.cells.len())
         let b = clamp(end, a, self.cells.len())
         if a < b {
+            self.invalidate_selection(a, b)
             if self.cells[a].width == 0 && a % self.cols > 0 { self.cells[a - 1] = self.empty() }
             if self.cells[b - 1].width == 2 && b % self.cols > 0 { self.cells[b] = self.empty() }
+            for row in a / self.cols..b / self.cols { self.wrapped[row] = 0 }
         }
         for i in a..b { self.cells[i] = self.empty() }
     }
@@ -173,23 +289,35 @@ impl Terminal {
             var line = Vec(Cell).with_capacity(self.cols)
             for x in 0..self.cols { line.push(self.cells[x]) }
             self.history.push(line)
+            self.history_wrapped.push(self.wrapped[0])
             if self.view > 0 { self.view += 1 }
-            if self.history.len() > HISTORY_LIMIT { self.history.remove(0) }
+            if self.history.len() > HISTORY_LIMIT {
+                self.history.remove(0)
+                self.history_wrapped.remove(0)
+                self.history_origin += 1
+                if self.selection_active && (self.selection_anchor.row < self.history_origin ||
+                    self.selection_head.row < self.history_origin) { self.clear_selection() }
+            }
             self.view = clamp(self.view, 0, self.history.len())
-        }
+        } else { self.clear_selection() }
         for y in self.top..self.bottom {
             for x in 0..self.cols { self.cells[y * self.cols + x] = self.cells[(y + 1) * self.cols + x] }
+            self.wrapped[y] = self.wrapped[y + 1]
         }
+        self.wrapped[self.bottom] = 0
         self.erase(self.bottom * self.cols, (self.bottom + 1) * self.cols)
     }
 
     fn scroll_down(inout self) {
+        self.clear_selection()
         var y = self.bottom
         while y > self.top {
             for x in 0..self.cols { self.cells[y * self.cols + x] = self.cells[(y - 1) * self.cols + x] }
+            self.wrapped[y] = self.wrapped[y - 1]
             y -= 1
         }
         self.erase(self.top * self.cols, (self.top + 1) * self.cols)
+        self.wrapped[self.top] = 0
     }
 
     fn newline(inout self) {
@@ -202,6 +330,7 @@ impl Terminal {
         let width = char_width(cp)
         if width == 0 { return }
         if self.autowrap && (self.wrap || (width == 2 && self.x == self.cols - 1)) {
+            self.wrapped[self.y] = if self.wrap { self.cols } else { self.x }
             self.x = 0
             self.newline()
         }
@@ -221,14 +350,17 @@ impl Terminal {
 
     fn switch_screen(inout self, enabled: bool) {
         if enabled == self.alternate { return }
+        self.clear_selection()
         if enabled {
             self.primary_x = self.x
             self.primary_y = self.y
             self.saved = mem.replace(&self.cells, grid(self.cols, self.rows))
+            self.saved_wrapped = mem.replace(&self.wrapped, Vec(i64).filled(self.rows, 0))
             self.x = 0
             self.y = 0
         } else {
             self.cells = mem.replace(&self.saved, Vec(Cell).new())
+            self.wrapped = mem.replace(&self.saved_wrapped, Vec(i64).new())
             self.x = clamp(self.primary_x, 0, self.cols - 1)
             self.y = clamp(self.primary_y, 0, self.rows - 1)
         }
@@ -309,7 +441,11 @@ impl Terminal {
             if mode == 0 { self.erase(pos, self.cells.len()) }
             else if mode == 1 { self.erase(0, pos + 1) }
             else if mode == 2 { self.erase(0, self.cells.len()) }
-            else if mode == 3 { self.history.clear(); self.view = 0 }
+            else if mode == 3 {
+                self.clear_selection()
+                self.history_origin += self.history.len()
+                self.history.clear(); self.history_wrapped.clear(); self.view = 0
+            }
         } else if final == 'K' {
             let start = self.y * self.cols
             if self.args[0] == 0 { self.erase(pos, start + self.cols) }
@@ -319,6 +455,7 @@ impl Terminal {
         else if final == 'P' || final == '@' {
             let count = clamp(n, 0, self.cols - self.x)
             let end = (self.y + 1) * self.cols
+            self.invalidate_selection(pos, end)
             if final == 'P' {
                 for i in pos..end - count { self.cells[i] = self.cells[i + count] }
                 self.erase(end - count, end)
@@ -389,7 +526,7 @@ impl Terminal {
         if b == 27 { self.state = 1; self.utf_left = 0; return }
         if b < 32 {
             if b == 13 { self.x = 0; self.wrap = false }
-            else if b == 10 || b == 11 || b == 12 { self.newline() }
+            else if b == 10 || b == 11 || b == 12 { self.wrapped[self.y] = 0; self.newline() }
             else if b == 8 { self.x = clamp(self.x - 1, 0, self.cols - 1); self.wrap = false }
             else if b == 9 { self.x = clamp((self.x / 8 + 1) * 8, 0, self.cols - 1); self.wrap = false }
             return
@@ -403,10 +540,11 @@ impl Terminal {
             else if b == '(' || b == ')' || b == '*' || b == '+' || b == '%' { self.state = 5 }
             else if b == '7' { self.saved_x = self.x; self.saved_y = self.y }
             else if b == '8' { self.x = clamp(self.saved_x, 0, self.cols - 1); self.y = clamp(self.saved_y, 0, self.rows - 1); self.wrap = false }
-            else if b == 'D' { self.newline() }
-            else if b == 'E' { self.x = 0; self.newline() }
+            else if b == 'D' { self.wrapped[self.y] = 0; self.newline() }
+            else if b == 'E' { self.wrapped[self.y] = 0; self.x = 0; self.newline() }
             else if b == 'M' { if self.y == self.top { self.scroll_down() } else { self.y = clamp(self.y - 1, 0, self.rows - 1) } }
             else if b == 'c' {
+                self.clear_selection()
                 self.switch_screen(false)
                 self.fg = FOREGROUND; self.bg = BACKGROUND; self.attrs = 0
                 self.x = 0; self.y = 0; self.top = 0; self.bottom = self.rows - 1

@@ -142,7 +142,9 @@ impl Renderer {
                 var fg = cell.fg
                 var bg = cell.bg
                 if cell.attrs & 4 != 0 { fg = cell.bg; bg = cell.fg }
-                let active = cursor && term.cursor_visible && term.view == 0 && term.x == x && term.y == y
+                let selected = term.is_selected(x, y)
+                if selected { bg = 0x36577c; fg = 0xf4f7fc }
+                let active = !selected && cursor && term.cursor_visible && term.view == 0 && term.x == x && term.y == y
                 if active { bg = 0xf1ce78; fg = terminal.BACKGROUND }
                 let px = (self.padding + x * self.cell_width) as f32
                 let py = (self.padding + y * self.cell_height) as f32

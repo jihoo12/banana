@@ -89,6 +89,10 @@ infocmp -x -A build/terminfo banana | ssh HOST 'tic -x -'
   cursor. Font sizing follows the compositor's reported content scale.
 - Up to 2,000 lines of scrollback. Use the wheel or Shift+PageUp/PageDown;
   typing returns to the live screen.
+- Left-drag to select text; Ctrl+Shift+C or Ctrl+Insert copies the selection
+  to the clipboard. Scroll while dragging to extend into scrollback. Selection
+  supports wide Unicode characters and joins automatically wrapped lines.
+  A click clears the selection, as do typing, resizing, or switching screens.
 - Ctrl+Shift+V or Shift+Insert pastes the clipboard. Ctrl+C, Ctrl+D, arrows,
   Home/End, Delete/Insert, and F1–F12 are sent to the child.
 
@@ -101,13 +105,15 @@ nix flake check
 
 Tests cover streaming and malformed UTF-8, ANSI operations, Hangul cell widths,
 alternate screens and resizing, scroll regions, bounded history, input and
-paste encoding, and randomized parser input. PTY integration tests check real
+paste encoding, mouse selection and copying across Unicode and scrollback,
+scaled mouse coordinates, and randomized parser input. PTY integration tests check real
 TTY descriptors, shell input/output, resize delivery, exit status, and 256 KiB
 of queued nonblocking writes.
 
 The graphical smoke test creates its own headless Wayland compositor, renders
 real PTY output with software OpenGL, reads back the framebuffer, and checks
-for colored antialiased text. It does not use the desktop's display socket:
+for colored antialiased text and selection highlighting. It does not use the
+desktop's display socket:
 
 ```sh
 nix develop --command python3 tools/smoke.py
@@ -121,7 +127,7 @@ a usable EGL driver and a Wayland compositor process.
 ## Current scope
 
 This is an initial terminal implementation, not a complete xterm replacement.
-It does not yet implement text selection/copy, mouse reporting to applications,
+It does not yet implement mouse reporting to applications,
 search, tabs, configurable key bindings, or full VT conformance. Basic Unicode
 scalar output works; combining marks are ignored, grapheme clustering and emoji
 shaping are not implemented, and wide-character editing is still limited.

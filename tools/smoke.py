@@ -55,6 +55,7 @@ def main():
                 for offset in (0, (width - 1) * 3, (height - 1) * width * 3, len(pixels) - 3):
                     assert pixels[offset:offset + 3] == bytes.fromhex("10151d"), "Drawable has not resized to the framebuffer"
                 assert bytes.fromhex("ef7181") in colors, "Missing ANSI red text"
+                assert bytes.fromhex("36577c") in colors, "Missing mouse selection highlight"
                 write_png(output.with_suffix(".png"), width, height, pixels)
                 print(f"wayland/OpenGL: {width}x{height}, {len(colors)} colors, PTY demo rendered")
                 print(f"Frame saved to {output.with_suffix('.png')}")

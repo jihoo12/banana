@@ -12,6 +12,8 @@ pub extern fn glfwWaitEventsTimeout(timeout: f64)
 pub extern fn glfwWindowShouldClose(window: *u8) -> i32
 pub extern fn glfwSetWindowShouldClose(window: *u8, value: i32)
 pub extern fn glfwGetFramebufferSize(window: *u8, w: *i32, h: *i32)
+pub extern fn glfwGetWindowSize(window: *u8, w: *i32, h: *i32)
+pub extern fn glfwGetCursorPos(window: *u8, x: *f64, y: *f64)
 pub extern fn glfwGetWindowContentScale(window: *u8, x: *f32, y: *f32)
 pub extern fn glfwSetWindowTitle(window: *u8, title: *u8)
 pub extern fn glfwSetWindowUserPointer(window: *u8, ptr: *u8)
@@ -19,8 +21,11 @@ pub extern fn glfwGetWindowUserPointer(window: *u8) -> *u8
 pub extern fn glfwSetKeyCallback(window: *u8, cb: fnptr(*u8, i32, i32, i32, i32)) -> *u8
 pub extern fn glfwSetCharCallback(window: *u8, cb: fnptr(*u8, u32)) -> *u8
 pub extern fn glfwSetScrollCallback(window: *u8, cb: fnptr(*u8, f64, f64)) -> *u8
+pub extern fn glfwSetCursorPosCallback(window: *u8, cb: fnptr(*u8, f64, f64)) -> *u8
+pub extern fn glfwSetMouseButtonCallback(window: *u8, cb: fnptr(*u8, i32, i32, i32)) -> *u8
 pub extern fn glfwSetErrorCallback(cb: fnptr(i32, *u8)) -> *u8
 pub extern fn glfwGetClipboardString(window: *u8) -> *u8
+pub extern fn glfwSetClipboardString(window: *u8, text: *u8)
 pub extern fn glfwGetTime() -> f64
 pub extern fn glfwGetKey(window: *u8, key: i32) -> i32
 pub extern fn glfwWindowHintString(hint: i32, value: *u8)
