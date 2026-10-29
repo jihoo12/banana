@@ -31,6 +31,11 @@ cursor-glow = true
 cursor-trail = true
 visual-bell = true
 
+# Fast mode: no shaders, gradient, vignette, cursor glow, trail or blinking,
+# and no vsync, for the lowest latency. Ctrl+Shift+F toggles it while Banana
+# runs; `banana --fast` starts in it.
+fast = false
+
 # true, false, or auto: shown when a plugin has something to display.
 status-bar = auto
 

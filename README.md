@@ -93,7 +93,7 @@ then the command line. [`banana.conf.example`](banana.conf.example) lists every
 setting; copy it to get started. `--config PATH` reads another file,
 `--no-config` skips it, and `--set key=value` overrides any setting, as do the
 shortcuts `--theme`, `--shader`, `--plugin`, `--font`, `--font-size` and
-`--opacity`. Settings cover the font, line height and padding, theme and
+`--opacity`, and `--fast` starts in fast mode. Settings cover the font, line height and padding, theme and
 individual colors, gradient and vignette, window opacity, cursor style, blink,
 glow and trail, the visual bell, the status bar, shaders and plugins.
 
@@ -155,6 +155,10 @@ it in `~/.config/banana/plugins/` or name its path.
   A click clears the selection, as do typing, resizing, or switching screens.
 - Ctrl+Shift+V or Shift+Insert pastes the clipboard. Ctrl+C, Ctrl+D, arrows,
   Home/End, Delete/Insert, and F1–F12 are sent to the child.
+- Ctrl+Shift+F toggles fast mode, which turns off shaders, the gradient and
+  vignette, cursor glow, trail and blinking, and vsync for the lowest latency;
+  turning it off restores the configured effects. Choosing a shader with
+  Ctrl+Shift+S also leaves fast mode.
 - Ctrl+Shift+T cycles themes, Ctrl+Shift+S cycles bundled shaders,
   Ctrl+Shift+R reloads shaders, and Ctrl+Shift+= / Ctrl+Shift+- / Ctrl+Shift+0
   change or reset the font size. A toast names each change.

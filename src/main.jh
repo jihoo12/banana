@@ -25,6 +25,7 @@ struct App {
     zoom: i64
     next_theme: bool
     next_shader: bool
+    toggle_fast: bool
     reload: bool
     mouse_x: f64
     mouse_y: f64
@@ -110,9 +111,10 @@ export fn on_key(window: *u8, key: i32, scancode: i32, action: i32, mods: i32) {
             }
             return
         }
-        // Ctrl+Shift: T theme, S shader, R reload shaders, = - 0 font size.
+        // Ctrl+Shift: T theme, S shader, F fast mode, R reload shaders, = - 0 font size.
         if ctrl_shift && action == 1 {
             if key == 84 { (*app).next_theme = true; return }
+            if key == 70 { (*app).toggle_fast = true; return }
             if key == 83 { (*app).next_shader = true; return }
             if key == 82 { (*app).reload = true; return }
             if key == 61 || key == 334 { (*app).zoom = 1; return }
@@ -171,12 +173,13 @@ fn usage() {
     println("  --shader NAME|PATH  add a post-processing shader; --list-shaders shows them")
     println("  --plugin NAME|PATH  load a plugin")
     println("  --font FAMILY, --font-size PIXELS, --opacity 0..1")
+    println("  --fast              start in fast mode (no shaders, animations or vsync)")
     println("  --set KEY=VALUE     any configuration setting")
     println("  --smoke-test OUTPUT.ppm")
     println("Mouse: left-drag to select. Ctrl+Shift+C / Ctrl+Insert copy.")
     println("Keys: Ctrl+Shift+V / Shift+Insert paste; Shift+PageUp/PageDown or wheel scroll.")
     println("      Ctrl+Shift+T next theme, Ctrl+Shift+S next shader, Ctrl+Shift+R reload shaders,")
-    println("      Ctrl+Shift+= / - / 0 font size.")
+    println("      Ctrl+Shift+F fast mode on/off, Ctrl+Shift+= / - / 0 font size.")
 }
 
 fn basename(path: str) -> str {
@@ -188,6 +191,20 @@ fn basename(path: str) -> str {
 fn show_toast(inout frame: renderer.Frame, text: str, time: f64) {
     frame.toast = String.from(text)
     frame.toast_time = time
+}
+
+// Fast mode drops everything that costs GPU time or redraws: shaders, the
+// gradient and vignette, cursor glow, trail and blinking, and vsync.
+fn apply_mode(inout frame: renderer.Frame, cfg: config.Config, fast: bool, smoke: bool) {
+    frame.cursor_blink = cfg.cursor_blink && !fast && !smoke
+    frame.cursor_glow = cfg.cursor_glow && !fast
+    frame.cursor_trail = cfg.cursor_trail && !fast && !smoke
+    frame.gradient = cfg.gradient && !fast
+    frame.vignette = if fast { 0.0 } else { cfg.vignette }
+}
+
+fn active_shaders(names: Vec(String), fast: bool) -> Vec(String) {
+    if fast { Vec(String).new() } else { names.clone() }
 }
 
 fn run() -> i32 {
@@ -209,6 +226,7 @@ fn run() -> i32 {
             for name in config.bundled("shaders", ".glsl") { println(name) }
             return 0
         } else if arg == "--no-config" { use_config = false }
+        else if arg == "--fast" { overrides.push((String.from("fast"), String.from("true"))) }
         else if arg == "--" || arg == "-e" {
             i += 1
             while i < args.len() { command.push(args[i]); i += 1 }
@@ -262,7 +280,7 @@ fn run() -> i32 {
             gradient: cfg.gradient, vignette: cfg.vignette, opacity: cfg.opacity,
             mouse_x: 0.0, mouse_y: 0.0, params: [0.0; 8], toast: String.new(), toast_time: 0.0 },
         plugins: Vec(plugin.Plugin).new(), zoom: 0, next_theme: false, next_shader: false,
-        reload: false, mouse_x: 0.0, mouse_y: 0.0 }
+        toggle_fast: false, reload: false, mouse_x: 0.0, mouse_y: 0.0 }
     for spec in cfg.plugins {
         match plugin.load(spec.as_str()) {
             Ok(p) => { app.frame.segments.push(String.new()); app.plugins.push(p) }
@@ -275,6 +293,8 @@ fn run() -> i32 {
     var shader_index: i64 = -1
     var shader_names = cfg.shaders.clone()
     var font_size = cfg.font_size
+    var fast = cfg.fast
+    apply_mode(&app.frame, cfg, fast, smoke.len > 0)
     unsafe {
         api.glfwSetErrorCallback(on_error)
         api.glfwInitHint(0x00050003, 0x00060003) // GLFW_PLATFORM_WAYLAND
@@ -288,7 +308,7 @@ fn run() -> i32 {
         api.glfwWindowHintString(0x00026001, "banana")
         let window = api.glfwCreateWindow(1000, 650, "Banana", null, null)
         if window == null { api.glfwTerminate(); return 1 }
-        api.glfwMakeContextCurrent(window); api.glfwSwapInterval(1)
+        api.glfwMakeContextCurrent(window); api.glfwSwapInterval(if fast { 0 } else { 1 })
         api.glfwSetWindowUserPointer(window, &app as *u8)
         api.glfwSetCharCallback(window, on_char); api.glfwSetKeyCallback(window, on_key)
         api.glfwSetScrollCallback(window, on_scroll)
@@ -298,7 +318,7 @@ fn run() -> i32 {
         var scale: f32 = 1.0; var scale_y: f32 = 1.0
         api.glfwGetWindowContentScale(window, &scale, &scale_y)
         var render = renderer.Renderer.new(cfg.font.as_str(), font_size, scale, cfg.padding, cfg.line_height)
-        render.set_effects(shader_names.clone())
+        render.set_effects(active_shaders(shader_names, fast))
         app.cell_width = render.cell_width; app.cell_height = render.cell_height; app.padding = render.padding
         var old_width: i32 = 0; var old_height: i32 = 0
         var bar_shown = app.frame.status_bar
@@ -346,8 +366,23 @@ fn run() -> i32 {
                 show_toast(&app.frame, "theme: " + theme.name_at(theme_index), now)
                 app.term.dirty = true
             }
+            if app.toggle_fast {
+                app.toggle_fast = false
+                fast = !fast
+                apply_mode(&app.frame, cfg, fast, smoke.len > 0)
+                api.glfwSwapInterval(if fast { 0 } else { 1 })
+                render.set_effects(active_shaders(shader_names, fast))
+                show_toast(&app.frame, if fast { "fast mode: on" } else { "fast mode: off" }, now)
+                app.term.dirty = true
+            }
             if app.next_shader {
                 app.next_shader = false
+                // Choosing a shader means wanting effects again.
+                if fast {
+                    fast = false
+                    apply_mode(&app.frame, cfg, fast, smoke.len > 0)
+                    api.glfwSwapInterval(1)
+                }
                 shader_names.clear()
                 if !shader_choices.is_empty() {
                     shader_index = if shader_index + 1 >= shader_choices.len() as i64 { -1 } else { shader_index + 1 }
@@ -380,7 +415,7 @@ fn run() -> i32 {
             if next_scale != scale {
                 drop(render)
                 render = renderer.Renderer.new(cfg.font.as_str(), font_size, next_scale, cfg.padding, cfg.line_height)
-                render.set_effects(shader_names.clone())
+                render.set_effects(active_shaders(shader_names, fast))
                 app.term.clear_selection()
                 app.cell_width = render.cell_width; app.cell_height = render.cell_height; app.padding = render.padding
                 scale = next_scale; old_width = 0

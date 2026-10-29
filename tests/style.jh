@@ -45,6 +45,7 @@ fn main() {
     check(cfg.set("opacity", "0.85").is_none() && cfg.opacity > 0.849 && cfg.opacity < 0.851, "opacity")
     check(cfg.set("opacity", "abc").is_some(), "opacity must be a number")
     check(cfg.set("cursor-style", "bar").is_none() && cfg.cursor_style == 6, "cursor-style")
+    check(cfg.set("fast", "on").is_none() && cfg.fast, "fast mode")
     check(cfg.set("status-bar", "auto").is_none() && cfg.status_bar == 2, "status-bar auto")
     check(cfg.set("theme", "matcha").is_none() && cfg.theme.as_str() == "matcha", "theme")
     check(cfg.set("theme", "no-such-theme").is_some(), "unknown theme")
