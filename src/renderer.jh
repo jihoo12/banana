@@ -192,7 +192,7 @@ impl Renderer {
                 ppm.push(pixels[i]); ppm.push(pixels[i + 1]); ppm.push(pixels[i + 2])
             }
         }
-        match fs.write_file(path, ppm.as_str()) {
+        match fs.write_bytes(path, ppm.as_bytes()) {
             Ok(_) => {}
             Err(message) => { println(message); panic("cannot save OpenGL framebuffer") }
         }

@@ -5,11 +5,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1793095438,
-        "narHash": "sha256-D6pq4teAUKCpy36ZwP9ZyIsSS3nF7mZb1oSUmo8nQww=",
+        "lastModified": 1793255296,
+        "narHash": "sha256-lY09LV0mAfaIddrzzxZzGfeF8esknmLysTD7pdJqjco=",
         "owner": "jihoolang",
         "repo": "jihoo",
-        "rev": "6c52f74d88696ecc21915b35d5c940eb141ac11f",
+        "rev": "722d2e274d1eb03a5547991f7da1ec241b6427a9",
         "type": "github"
       },
       "original": {

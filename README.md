@@ -17,10 +17,12 @@ nix develop
 bash run.sh
 ```
 
-The flake provides the pinned jihoo compiler, Clang, GLFW, OpenGL development
+The flake provides the pinned jihoo 0.3.0 compiler, Clang, GLFW, OpenGL development
 libraries, FreeType, fontconfig, ncurses, DejaVu fonts, Noto CJK fonts, Python,
-and Weston. `flake.lock` pins the compiler to the same revision as the sibling
-`../jihoo` checkout used to develop this project.
+and Weston. `flake.lock` pins the compiler to revision
+`722d2e274d1eb03a5547991f7da1ec241b6427a9`, matching the sibling `../jihoo`
+checkout used for this update. The compiler package includes its matching
+standard library; re-enter `nix develop` after updating the lock file.
 
 The development shell sets `$SHELL` to Bash with Readline support so Banana's
 default shell supports line editing and colored prompts. Nix's build-time Bash
@@ -99,11 +101,14 @@ infocmp -x -A build/terminfo banana | ssh HOST 'tic -x -'
 ## Verification
 
 ```sh
+nix develop --command jihoo check src/main.jh
 nix develop --command bash tools/test.sh
 nix flake check
 ```
 
-Tests cover streaming and malformed UTF-8, ANSI operations, Hangul cell widths,
+The test script first checks the complete application, including the window
+and renderer, with jihoo's type, ownership, and borrow checker. Runtime tests
+cover streaming and malformed UTF-8, ANSI operations, Hangul cell widths,
 alternate screens and resizing, scroll regions, bounded history, input and
 paste encoding, mouse selection and copying across Unicode and scrollback,
 scaled mouse coordinates, and randomized parser input. PTY integration tests check real
