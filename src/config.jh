@@ -1,0 +1,239 @@
+// Settings from ~/.config/banana/banana.conf, then the command line.
+import api
+import std.env
+import std.ffi
+import std.fs
+import std.libc
+import std.sys
+import theme
+
+pub struct Config {
+    pub font: String
+    pub font_size: i64
+    pub theme: String
+    // Colors that replace the theme's, as `key = #rrggbb` lines.
+    pub colors: Vec((String, u32))
+    pub opacity: f32
+    pub padding: i64
+    pub line_height: f32
+    pub gradient: bool
+    pub vignette: f32
+    // A DECSCUSR shape: 2 block, 4 underline, 6 bar.
+    pub cursor_style: i64
+    pub cursor_blink: bool
+    pub cursor_glow: bool
+    pub cursor_trail: bool
+    pub visual_bell: bool
+    // 0 hidden, 1 shown, 2 shown when a plugin has something to say.
+    pub status_bar: i64
+    pub shaders: Vec(String)
+    pub plugins: Vec(String)
+}
+
+pub fn defaults() -> Config {
+    Config { font: String.from("JetBrains Mono"), font_size: 16, theme: String.from("banana"),
+        colors: Vec((String, u32)).new(), opacity: 1.0, padding: 14, line_height: 1.3,
+        gradient: true, vignette: 0.35, cursor_style: 2, cursor_blink: true, cursor_glow: true,
+        cursor_trail: true, visual_bell: true, status_bar: 2,
+        shaders: Vec(String).new(), plugins: Vec(String).new() }
+}
+
+fn warn(path: str, line: i64, message: str) {
+    var text = String.from("banana: ")
+    text.push_str(path); text.push(':'); line.show(&text)
+    text.push_str(": "); text.push_str(message); text.push('\n')
+    sys.write_err(text.as_str())
+}
+
+pub fn parse_float(text: str) -> Option(f64) {
+    let c = match ffi.c_string(text) { Ok(c) => c, Err(_) => { return None } }
+    var end: *u8 = null
+    let start = c.as_str().ptr
+    let value = unsafe { libc.strtod(start, &end) }
+    if text.len == 0 || unsafe { end != start + text.len } { return None }
+    Some(value)
+}
+
+fn parse_bool(text: str) -> Option(bool) {
+    if text == "true" || text == "yes" || text == "on" { Some(true) }
+    else if text == "false" || text == "no" || text == "off" { Some(false) }
+    else { None }
+}
+
+impl Config {
+    // Applies one `key = value` setting; returns an error message.
+    pub fn set(inout self, key: str, value: str) -> Option(String) {
+        if key == "font" { self.font = String.from(value) }
+        else if key == "font-size" {
+            match value.parse_int() {
+                Some(n) => { if n < 6 || n > 72 { return Some(String.from("font-size must be 6..72")) }; self.font_size = n }
+                None => { return Some(String.from("font-size must be a number")) }
+            }
+        } else if key == "theme" {
+            if theme.builtin(value).is_none() { return Some(String.from("unknown theme")) }
+            self.theme = String.from(value)
+        } else if key == "opacity" || key == "line-height" || key == "vignette" {
+            match parse_float(value) {
+                Some(n) => {
+                    if key == "opacity" { self.opacity = clampf(n as f32, 0.05, 1.0) }
+                    else if key == "line-height" { self.line_height = clampf(n as f32, 0.8, 3.0) }
+                    else { self.vignette = clampf(n as f32, 0.0, 1.0) }
+                }
+                None => { return Some(String.from("expected a number")) }
+            }
+        } else if key == "padding" {
+            match value.parse_int() {
+                Some(n) => { if n < 0 || n > 200 { return Some(String.from("padding must be 0..200")) }; self.padding = n }
+                None => { return Some(String.from("padding must be a number")) }
+            }
+        } else if key == "cursor-style" {
+            if value == "block" { self.cursor_style = 2 }
+            else if value == "underline" { self.cursor_style = 4 }
+            else if value == "bar" || value == "beam" { self.cursor_style = 6 }
+            else { return Some(String.from("cursor-style is block, underline or bar")) }
+        } else if key == "status-bar" {
+            if value == "auto" { self.status_bar = 2 }
+            else {
+                match parse_bool(value) {
+                    Some(on) => { self.status_bar = if on { 1 } else { 0 } }
+                    None => { return Some(String.from("status-bar is true, false or auto")) }
+                }
+            }
+        } else if key == "gradient" || key == "cursor-blink" || key == "cursor-glow" ||
+            key == "cursor-trail" || key == "visual-bell" {
+            match parse_bool(value) {
+                Some(on) => {
+                    if key == "gradient" { self.gradient = on }
+                    else if key == "cursor-blink" { self.cursor_blink = on }
+                    else if key == "cursor-glow" { self.cursor_glow = on }
+                    else if key == "cursor-trail" { self.cursor_trail = on }
+                    else { self.visual_bell = on }
+                }
+                None => { return Some(String.from("expected true or false")) }
+            }
+        } else if key == "shader" {
+            if value == "none" { self.shaders.clear() } else { self.shaders.push(String.from(value)) }
+        } else if key == "plugin" { self.plugins.push(String.from(value)) }
+        else {
+            match theme.parse_color(value) {
+                Some(rgb) => {
+                    var probe = theme.builtin("banana").unwrap()
+                    if !probe.set(key, rgb) { return Some(String.from("unknown setting")) }
+                    self.colors.push((String.from(key), rgb))
+                }
+                None => { return Some(String.from("unknown setting")) }
+            }
+        }
+        None
+    }
+
+    pub fn load(inout self, path: str, required: bool) {
+        let text = match fs.read_file(path) {
+            Ok(text) => text
+            Err(e) => {
+                if required { warn(path, 0, "cannot read the configuration") }
+                return
+            }
+        }
+        var number: i64 = 0
+        for raw in text.as_str().lines() {
+            number += 1
+            let line = raw.trim()
+            if line.len == 0 || line[0] == '#' { continue }
+            match line.find("=") {
+                Some(eq) => {
+                    let key = line[0..eq].trim()
+                    let value = line[eq + 1..].trim()
+                    match self.set(key, value) {
+                        Some(message) => warn(path, number, message.as_str())
+                        None => {}
+                    }
+                }
+                None => warn(path, number, "expected `key = value`")
+            }
+        }
+    }
+
+    pub fn make_theme(self) -> theme.Theme {
+        var t = match theme.builtin(self.theme.as_str()) { Some(t) => t, None => theme.builtin("banana").unwrap() }
+        for entry in self.colors { t.set(entry.0.as_str(), entry.1) }
+        t
+    }
+}
+
+pub fn clampf(n: f32, lo: f32, hi: f32) -> f32 {
+    if n < lo { lo } else if n > hi { hi } else { n }
+}
+
+// $XDG_CONFIG_HOME/banana, or ~/.config/banana.
+pub fn config_dir() -> String {
+    match env.get("XDG_CONFIG_HOME") {
+        Some(dir) => { if dir.len > 0 { return String.from(dir) + "/banana" } }
+        None => {}
+    }
+    match env.get("HOME") {
+        Some(home) => String.from(home) + "/.config/banana"
+        None => String.from(".config/banana")
+    }
+}
+
+// The directory holding the running executable, with a trailing slash.
+pub fn exe_dir() -> String {
+    var path = [0 as u8; 4096]
+    let n = unsafe { api.readlink("/proc/self/exe", &path[0], 4096) }
+    if n <= 0 || n >= 4096 { return String.new() }
+    let text = unsafe { make_str(&path[0], n) }
+    var end = n
+    while end > 0 && text[end - 1] != '/' { end -= 1 }
+    String.from(text[0..end])
+}
+
+pub fn exists(path: str) -> bool {
+    let c = match ffi.c_string(path) { Ok(c) => c, Err(_) => { return false } }
+    unsafe { libc.access(c.as_str().ptr, 4) == 0 }
+}
+
+// Where to find a named resource: user files first, then the build or package.
+pub fn search(kind: str, name: str, extension: str) -> Option(String) {
+    if name.contains("/") { return if exists(name) { Some(String.from(name)) } else { None } }
+    var file = String.from(name)
+    if !name.ends_with(extension) { file.push_str(extension) }
+    let exe = exe_dir()
+    var dirs = Vec(String).new()
+    dirs.push(config_dir() + "/" + kind)
+    dirs.push(exe.as_str() + kind)
+    dirs.push(exe.as_str() + "../share/banana/" + kind)
+    dirs.push(exe.as_str() + "../lib/banana/" + kind)
+    for dir in dirs {
+        let candidate = dir.as_str() + "/" + file.as_str()
+        if exists(candidate.as_str()) { return Some(candidate) }
+    }
+    None
+}
+
+// Names of the bundled resources of a kind, such as every shader shipped.
+pub fn bundled(kind: str, extension: str) -> Vec(String) {
+    var out = Vec(String).new()
+    let exe = exe_dir()
+    var dirs = Vec(String).new()
+    dirs.push(config_dir() + "/" + kind)
+    dirs.push(exe.as_str() + kind)
+    dirs.push(exe.as_str() + "../share/banana/" + kind)
+    for dir in dirs {
+        match fs.read_dir(dir.as_str()) {
+            Ok(names) => {
+                for name in names {
+                    if name.as_str().ends_with(extension) {
+                        let stem = String.from(name.as_str()[0..name.len() - extension.len])
+                        var seen = false
+                        for other in out { if other == stem { seen = true } }
+                        if !seen { out.push(stem) }
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    sort(&out)
+    out
+}

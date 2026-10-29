@@ -9,6 +9,9 @@ pub struct Session {
     pub exited: bool
     pub eof: bool
     pub status: i32
+    // When `tap` is set, a copy of the child's output collects in `tapped`.
+    pub tap: bool
+    pub tapped: String
     queue: String
     sent: i64
 }
@@ -48,7 +51,7 @@ pub fn spawn(args: Vec(str), cols: i64, rows: i64) -> Session {
             panic("cannot configure PTY")
         }
     }
-    Session { fd, pid, exited: false, eof: false, status: 0, queue: String.new(), sent: 0 }
+    Session { fd, pid, exited: false, eof: false, status: 0, tap: false, tapped: String.new(), queue: String.new(), sent: 0 }
 }
 
 impl Session {
@@ -79,7 +82,11 @@ impl Session {
         // Limit one iteration's work so a busy child cannot starve Wayland.
         for _ in 0..16 {
             let n = unsafe { libc.read(self.fd, &buf[0], 16384) }
-            if n > 0 { term.feed(unsafe { make_str(&buf[0], n) }) }
+            if n > 0 {
+                let bytes = unsafe { make_str(&buf[0], n) }
+                if self.tap && self.tapped.len() < 1048576 { self.tapped.push_str(bytes) }
+                term.feed(bytes)
+            }
             else {
                 let err = unsafe { *libc.__errno_location() }
                 if n == 0 || (n < 0 && err == 5) { self.eof = true }

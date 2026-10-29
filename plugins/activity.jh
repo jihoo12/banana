@@ -1,0 +1,76 @@
+// An activity meter written in jihoo: shows how fast the shell is printing
+// and sets shader parameter 0 to the level, which `pulse.glsl` turns into light.
+import std.fmt
+import std.mem
+
+// Mirrors BananaHost in include/banana_plugin.h.
+struct Host {
+    abi: u32
+    reserved: u32
+    ctx: *u8
+    send: fnptr(*u8, *u8, i64)
+    feed: fnptr(*u8, *u8, i64)
+    set_status: fnptr(*u8, *u8)
+    log: fnptr(*u8, *u8)
+    set_param: fnptr(*u8, i32, f32)
+    request_redraw: fnptr(*u8)
+}
+
+struct Meter {
+    host: *Host
+    bytes: i64
+    rate: f64
+    level: f32
+    last: f64
+    shown: String
+}
+
+export fn banana_plugin_init(host: *Host, args: *u8, state: **u8) -> i32 {
+    unsafe {
+        if (*host).abi != 1 { return 1 }
+        let meter = mem.alloc(Meter, 1)
+        write(meter, Meter { host, bytes: 0, rate: 0.0, level: 0.0, last: 0.0, shown: String.new() })
+        *state = meter as *u8
+    }
+    0
+}
+
+export fn banana_plugin_output(state: *u8, bytes: *u8, length: i64) {
+    unsafe { (*(state as *Meter)).bytes += length }
+}
+
+export fn banana_plugin_tick(state: *u8, time: f64) {
+    unsafe {
+        let m = state as *Meter
+        let dt = time - (*m).last
+        if dt < 0.1 { return }
+        (*m).last = time
+        // Exponential smoothing keeps the meter calm.
+        let instant = (*m).bytes as f64 / dt
+        (*m).bytes = 0
+        (*m).rate = (*m).rate * 0.6 + instant * 0.4
+        let target = if (*m).rate < 16.0 { 0.0 } else { (*m).rate / 65536.0 }
+        var level = (*m).level as f64 * 0.7 + (if target > 1.0 { 1.0 } else { target }) * 0.3
+        if level < 0.002 { level = 0.0 }
+        if (level as f32) != (*m).level {
+            (*m).level = level as f32
+            ((*(*m).host).set_param)((*(*m).host).ctx, 0, (*m).level)
+        }
+        var text = if (*m).rate < 16.0 { String.from("● idle") }
+            else if (*m).rate < 1024.0 { fmt.format("▲ {:.0} B/s", (*m).rate) }
+            else if (*m).rate < 1048576.0 { fmt.format("▲ {:.1} KB/s", (*m).rate / 1024.0) }
+            else { fmt.format("▲ {:.1} MB/s", (*m).rate / 1048576.0) }
+        if text != (*m).shown {
+            (*m).shown = text.clone()
+            text.push(0)
+            ((*(*m).host).set_status)((*(*m).host).ctx, text.as_str().ptr)
+        }
+    }
+}
+
+export fn banana_plugin_destroy(state: *u8) {
+    unsafe {
+        mem.drop_at(Meter, state as *Meter)
+        mem.dealloc(Meter, state as *Meter, 1)
+    }
+}

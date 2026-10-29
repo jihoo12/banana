@@ -1,0 +1,58 @@
+import config
+import terminal
+import theme
+
+fn check(ok: bool, message: str) { if !ok { panic(message) } }
+
+fn main() {
+    var t = terminal.Terminal.new(20, 4)
+    t.feed("\x1b[1;2;3;9mA\x1b[22;23mB\x1b[29mC\x1b[0m")
+    check(t.cells[0].attrs == 1 + 8 + 16 + 32, "bold, dim, italic, strike")
+    check(t.cells[1].attrs == 32, "22 clears bold and dim, 23 italic")
+    check(t.cells[2].attrs == 0, "29 clears strike")
+    t.feed("\x1b[31;42mD\x1b[91mE\x1b[38;5;196mF\x1b[0m")
+    check(t.cells[3].fg == terminal.PALETTE | 1 && t.cells[3].bg == terminal.PALETTE | 2, "ANSI colors refer to the theme")
+    check(t.cells[4].fg == terminal.PALETTE | 9, "bright colors refer to the theme")
+    check(t.cells[5].fg == 0xff0000, "256-color cube is fixed")
+    check(t.cells[6].fg == terminal.FOREGROUND && t.cells[6].bg == terminal.BACKGROUND, "default colors")
+    t.feed("\x1b[5 q")
+    check(t.cursor_shape == 5, "DECSCUSR bar")
+    t.feed("\x1b[2 q")
+    check(t.cursor_shape == 2, "DECSCUSR steady block")
+    t.feed("\x1bc")
+    check(t.cursor_shape == 0, "reset restores the configured cursor")
+    t.feed("\x07")
+    check(t.bell, "BEL rings")
+    t.bell = false
+    t.feed("\x1b]2;title\x07")
+    check(!t.bell && t.title.as_str() == "title", "BEL ending OSC is not a bell")
+
+    let dark = theme.builtin("banana").unwrap()
+    check(dark.resolve(terminal.PALETTE | 1) == dark.palette[1], "palette lookup")
+    check(dark.resolve(terminal.FOREGROUND) == dark.foreground, "foreground lookup")
+    check(dark.resolve(terminal.BACKGROUND) == dark.background, "background lookup")
+    check(dark.resolve(0x123456) == 0x123456, "RGB passes through")
+    for i in 0..theme.NAMES {
+        check(theme.builtin(theme.name_at(i)).is_some(), "every listed theme exists")
+        check(theme.index_of(theme.name_at(i)) == i, "theme index")
+    }
+    check(theme.parse_color("#a1B2c3").unwrap() == 0xa1b2c3, "parse color")
+    check(theme.parse_color("#12345").is_none() && theme.parse_color("zzzzzz").is_none(), "reject bad colors")
+
+    var cfg = config.defaults()
+    check(cfg.set("font-size", "20").is_none() && cfg.font_size == 20, "font-size")
+    check(cfg.set("font-size", "2").is_some(), "font-size range")
+    check(cfg.set("opacity", "0.85").is_none() && cfg.opacity > 0.849 && cfg.opacity < 0.851, "opacity")
+    check(cfg.set("opacity", "abc").is_some(), "opacity must be a number")
+    check(cfg.set("cursor-style", "bar").is_none() && cfg.cursor_style == 6, "cursor-style")
+    check(cfg.set("status-bar", "auto").is_none() && cfg.status_bar == 2, "status-bar auto")
+    check(cfg.set("theme", "matcha").is_none() && cfg.theme.as_str() == "matcha", "theme")
+    check(cfg.set("theme", "no-such-theme").is_some(), "unknown theme")
+    check(cfg.set("shader", "crt").is_none() && cfg.set("shader", "bloom").is_none() && cfg.shaders.len() == 2, "shader chain")
+    check(cfg.set("shader", "none").is_none() && cfg.shaders.is_empty(), "shader none clears")
+    check(cfg.set("color1", "#010203").is_none() && cfg.set("background", "#000000").is_none(), "color overrides")
+    check(cfg.set("color16", "#010203").is_some() && cfg.set("bogus", "1").is_some(), "unknown settings")
+    let custom = cfg.make_theme()
+    check(custom.name.as_str() == "matcha" && custom.palette[1] == 0x010203 && custom.background == 0, "overrides apply")
+    println("style: all checks passed")
+}

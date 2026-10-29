@@ -24,6 +24,8 @@ pub extern fn glfwSetScrollCallback(window: *u8, cb: fnptr(*u8, f64, f64)) -> *u
 pub extern fn glfwSetCursorPosCallback(window: *u8, cb: fnptr(*u8, f64, f64)) -> *u8
 pub extern fn glfwSetMouseButtonCallback(window: *u8, cb: fnptr(*u8, i32, i32, i32)) -> *u8
 pub extern fn glfwSetErrorCallback(cb: fnptr(i32, *u8)) -> *u8
+pub extern fn glfwSetWindowFocusCallback(window: *u8, cb: fnptr(*u8, i32)) -> *u8
+pub extern fn glfwPostEmptyEvent()
 pub extern fn glfwGetClipboardString(window: *u8) -> *u8
 pub extern fn glfwSetClipboardString(window: *u8, text: *u8)
 pub extern fn glfwGetTime() -> f64
@@ -36,6 +38,8 @@ pub extern fn glClearColor(r: f32, g: f32, b: f32, a: f32)
 pub extern fn glClear(mask: u32)
 pub extern fn glEnable(cap: u32)
 pub extern fn glBlendFunc(src: u32, dst: u32)
+pub extern fn glBlendFuncSeparate(src: u32, dst: u32, src_alpha: u32, dst_alpha: u32)
+pub extern fn glDisable(cap: u32)
 pub extern fn glCreateShader(kind: u32) -> u32
 pub extern fn glShaderSource(shader: u32, count: i32, sources: **u8, lengths: *i32)
 pub extern fn glCompileShader(shader: u32)
@@ -51,6 +55,17 @@ pub extern fn glUseProgram(program: u32)
 pub extern fn glDeleteProgram(program: u32)
 pub extern fn glGetUniformLocation(program: u32, name: *u8) -> i32
 pub extern fn glUniform2f(location: i32, x: f32, y: f32)
+pub extern fn glUniform1f(location: i32, x: f32)
+pub extern fn glUniform1i(location: i32, x: i32)
+pub extern fn glUniform3f(location: i32, x: f32, y: f32, z: f32)
+pub extern fn glUniform4f(location: i32, x: f32, y: f32, z: f32, w: f32)
+pub extern fn glUniform1fv(location: i32, count: i32, values: *f32)
+pub extern fn glActiveTexture(unit: u32)
+pub extern fn glGenFramebuffers(n: i32, framebuffers: *u32)
+pub extern fn glBindFramebuffer(target: u32, framebuffer: u32)
+pub extern fn glFramebufferTexture2D(target: u32, attachment: u32, textarget: u32, texture: u32, level: i32)
+pub extern fn glCheckFramebufferStatus(target: u32) -> u32
+pub extern fn glDeleteFramebuffers(n: i32, framebuffers: *u32)
 pub extern fn glGenVertexArrays(n: i32, arrays: *u32)
 pub extern fn glBindVertexArray(array: u32)
 pub extern fn glDeleteVertexArrays(n: i32, arrays: *u32)
@@ -82,9 +97,11 @@ pub struct FontGlyph {
 pub extern fn banana_font_open(family: *u8, size: i32) -> *u8
 pub extern fn banana_font_width(font: *u8) -> i32
 pub extern fn banana_font_ascent(font: *u8) -> i32
-pub extern fn banana_font_glyph(font: *u8, cp: u32) -> FontGlyph
+pub extern fn banana_font_descent(font: *u8) -> i32
+pub extern fn banana_font_glyph(font: *u8, cp: u32, style: i32) -> FontGlyph
 pub extern fn banana_char_width(cp: u32) -> i32
 pub extern fn banana_font_close(font: *u8)
+pub extern fn banana_file_mtime(path: *u8) -> i64
 
 pub struct Winsize { pub rows: u16, pub cols: u16, pub xpixel: u16, pub ypixel: u16 }
 pub extern fn forkpty(master: *i32, name: *u8, termios: *u8, size: *Winsize) -> i32

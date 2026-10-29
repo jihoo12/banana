@@ -1,12 +1,15 @@
 import api
+import config
 import input
+import plugin
 import pty
 import renderer
 import terminal
+import theme
 import std.env
 import std.ffi
 import std.fs
-import std.libc
+import std.mem
 import std.sys
 
 struct App {
@@ -15,6 +18,16 @@ struct App {
     cell_width: i64
     cell_height: i64
     padding: i64
+    theme: theme.Theme
+    frame: renderer.Frame
+    plugins: Vec(plugin.Plugin)
+    // Requests from input callbacks, applied by the main loop.
+    zoom: i64
+    next_theme: bool
+    next_shader: bool
+    reload: bool
+    mouse_x: f64
+    mouse_y: f64
 }
 
 unsafe fn mouse_selection(window: *u8, start: bool) {
@@ -44,7 +57,20 @@ export fn on_mouse_button(window: *u8, button: i32, action: i32, mods: i32) {
 }
 
 export fn on_mouse_move(window: *u8, x: f64, y: f64) {
-    unsafe { mouse_selection(window, false) }
+    unsafe {
+        let app = api.glfwGetWindowUserPointer(window) as *App
+        if app != null { (*app).mouse_x = x; (*app).mouse_y = y }
+        mouse_selection(window, false)
+    }
+}
+
+export fn on_focus(window: *u8, focused: i32) {
+    unsafe {
+        let app = api.glfwGetWindowUserPointer(window) as *App
+        if app == null { return }
+        (*app).frame.focused = focused != 0
+        (*app).term.dirty = true
+    }
 }
 
 export fn on_error(code: i32, message: *u8) {
@@ -74,7 +100,9 @@ export fn on_key(window: *u8, key: i32, scancode: i32, action: i32, mods: i32) {
     unsafe {
         let app = api.glfwGetWindowUserPointer(window) as *App
         if app == null { return }
-        if (mods & 3 == 3 && key == 67) || (mods & 2 != 0 && key == 260) {
+        for p in (*app).plugins { if p.key(key, mods) { return } }
+        let ctrl_shift = mods & 3 == 3
+        if (ctrl_shift && key == 67) || (mods & 2 != 0 && key == 260) {
             if (*app).term.has_selection() {
                 let text = (*app).term.selection_text()
                 let clip = ffi.c_string(text.as_str()).unwrap()
@@ -82,12 +110,21 @@ export fn on_key(window: *u8, key: i32, scancode: i32, action: i32, mods: i32) {
             }
             return
         }
+        // Ctrl+Shift: T theme, S shader, R reload shaders, = - 0 font size.
+        if ctrl_shift && action == 1 {
+            if key == 84 { (*app).next_theme = true; return }
+            if key == 83 { (*app).next_shader = true; return }
+            if key == 82 { (*app).reload = true; return }
+            if key == 61 || key == 334 { (*app).zoom = 1; return }
+            if key == 45 || key == 333 { (*app).zoom = -1; return }
+            if key == 48 { (*app).zoom = 2; return }
+        }
         if mods & 1 != 0 && (key == 266 || key == 267) {
             (*app).term.scroll_view(if key == 266 { (*app).term.rows / 2 } else { 0 - (*app).term.rows / 2 })
             mouse_selection(window, false)
             return
         }
-        if (mods & 3 == 3 && key == 86) || (mods & 1 != 0 && key == 260) {
+        if (ctrl_shift && key == 86) || (mods & 1 != 0 && key == 260) {
             let clip = api.glfwGetClipboardString(window)
             if clip != null {
                 let text = ffi.copy_c_string(clip)
@@ -120,63 +157,124 @@ export fn on_scroll(window: *u8, dx: f64, dy: f64) {
 fn configure_terminfo() {
     // A development binary finds the database generated next to it by build.sh.
     if env.get("TERMINFO").is_some() { return }
-    var path = [0 as u8; 4096]
-    let n = unsafe { api.readlink("/proc/self/exe", &path[0], 4096) }
-    if n <= 0 || n >= 4096 { return }
-    let text = unsafe { make_str(&path[0], n) }
-    var end = n
-    while end > 0 && text[end - 1] != '/' { end -= 1 }
-    var database = String.from(text[0..end]); database.push_str("terminfo")
+    let database = config.exe_dir() + "terminfo"
     let c = ffi.c_string(database.as_str()).unwrap()
     unsafe { api.setenv("TERMINFO", c.as_str().ptr, 0) }
+}
+
+fn usage() {
+    println("Banana — a Wayland OpenGL terminal written in jihoo")
+    println("Usage: banana [OPTION...] [-e|-- COMMAND ARG...]")
+    println("  --config PATH       read settings from PATH (default ~/.config/banana/banana.conf)")
+    println("  --no-config         ignore the configuration file")
+    println("  --theme NAME        color theme; --list-themes shows them")
+    println("  --shader NAME|PATH  add a post-processing shader; --list-shaders shows them")
+    println("  --plugin NAME|PATH  load a plugin")
+    println("  --font FAMILY, --font-size PIXELS, --opacity 0..1")
+    println("  --set KEY=VALUE     any configuration setting")
+    println("  --smoke-test OUTPUT.ppm")
+    println("Mouse: left-drag to select. Ctrl+Shift+C / Ctrl+Insert copy.")
+    println("Keys: Ctrl+Shift+V / Shift+Insert paste; Shift+PageUp/PageDown or wheel scroll.")
+    println("      Ctrl+Shift+T next theme, Ctrl+Shift+S next shader, Ctrl+Shift+R reload shaders,")
+    println("      Ctrl+Shift+= / - / 0 font size.")
+}
+
+fn basename(path: str) -> str {
+    var start = 0
+    for i in 0..path.len { if path[i] == '/' { start = i + 1 } }
+    path[start..]
+}
+
+fn show_toast(inout frame: renderer.Frame, text: str, time: f64) {
+    frame.toast = String.from(text)
+    frame.toast_time = time
 }
 
 fn run() -> i32 {
     let args = env.args()
     var command = Vec(str).new()
-    var family: str = "DejaVu Sans Mono"
-    var font_size: i64 = 18
+    var overrides = Vec((String, String)).new()
+    var config_path = config.config_dir() + "/banana.conf"
+    var config_required = false
+    var use_config = true
     var smoke: str = ""
     var i = 1
     while i < args.len() {
         let arg = args[i]
-        if arg == "--help" || arg == "-h" {
-            println("Banana — a Wayland OpenGL terminal written in jihoo")
-            println("Usage: banana [--font FAMILY] [--font-size PIXELS] [-e|-- COMMAND ARG...]")
-            println("       banana --smoke-test OUTPUT.ppm")
-            println("Mouse: left-drag to select. Ctrl+Shift+C / Ctrl+Insert copy.")
-            println("Keys: Ctrl+Shift+V / Shift+Insert paste; Shift+PageUp/PageDown or wheel scroll.")
+        if arg == "--help" || arg == "-h" { usage(); return 0 }
+        else if arg == "--list-themes" {
+            for n in 0..theme.NAMES { println(theme.name_at(n)) }
             return 0
-        } else if arg == "--font" || arg == "--font-size" || arg == "--smoke-test" {
-            if i + 1 >= args.len() { sys.write_err("banana: option requires a value\n"); return 2 }
-            i += 1
-            if arg == "--font" { family = args[i] }
-            else if arg == "--smoke-test" { smoke = args[i] }
-            else {
-                match args[i].parse_int() {
-                    Some(n) => { if n < 8 || n > 48 { sys.write_err("banana: font size must be 8..48\n"); return 2 }; font_size = n }
-                    None => { sys.write_err("banana: invalid font size\n"); return 2 }
-                }
-            }
-        } else if arg == "--" || arg == "-e" {
+        } else if arg == "--list-shaders" {
+            for name in config.bundled("shaders", ".glsl") { println(name) }
+            return 0
+        } else if arg == "--no-config" { use_config = false }
+        else if arg == "--" || arg == "-e" {
             i += 1
             while i < args.len() { command.push(args[i]); i += 1 }
             if command.is_empty() { sys.write_err("banana: command required after -e/--\n"); return 2 }
             break
+        } else if arg.starts_with("--") {
+            if i + 1 >= args.len() { sys.write_err("banana: unknown option or missing value; use --help\n"); return 2 }
+            i += 1
+            let value = args[i]
+            if arg == "--config" { config_path = String.from(value); config_required = true }
+            else if arg == "--smoke-test" { smoke = value }
+            else if arg == "--set" {
+                match value.find("=") {
+                    Some(eq) => overrides.push((String.from(value[0..eq].trim()), String.from(value[eq + 1..].trim())))
+                    None => { sys.write_err("banana: --set needs KEY=VALUE\n"); return 2 }
+                }
+            } else if arg == "--theme" || arg == "--shader" || arg == "--plugin" || arg == "--font" ||
+                arg == "--font-size" || arg == "--opacity" {
+                overrides.push((String.from(arg[2..]), String.from(value)))
+            } else { sys.write_err("banana: unknown option; use --help\n"); return 2 }
         } else { sys.write_err("banana: unknown option; use --help\n"); return 2 }
         i += 1
+    }
+    var cfg = config.defaults()
+    // The smoke test must not depend on the user's settings unless asked to.
+    if use_config && (smoke.len == 0 || config_required) { cfg.load(config_path.as_str(), config_required) }
+    for entry in overrides {
+        match cfg.set(entry.0.as_str(), entry.1.as_str()) {
+            Some(message) => {
+                sys.write_err("banana: --" + entry.0.as_str() + ": " + message.as_str() + "\n")
+                return 2
+            }
+            None => {}
+        }
     }
     if command.is_empty() {
         if smoke.len > 0 {
             command.push("sh"); command.push("-c")
-            command.push("printf '\x1b[1;33mBANANA\x1b[0m  /  jihoo + Wayland + OpenGL\r\n\r\nNative PTY shell connected.\r\n\x1b[31mred  \x1b[32mgreen  \x1b[34mblue  \x1b[38;2;200;140;255mtruecolor\x1b[0m\r\nUTF-8: 안녕하세요 — 日本語\r\n\x1b[4mUnderline\x1b[0m  \x1b[7mInverse\x1b[0m\r\n'; test -t 0 && test -t 1 && test -t 2")
+            command.push("printf '\x1b[1;33mBANANA\x1b[0m  /  jihoo + Wayland + OpenGL\r\n\r\nNative PTY shell connected.\r\n\x1b[31mred  \x1b[32mgreen  \x1b[34mblue  \x1b[38;2;200;140;255mtruecolor\x1b[0m\r\n\x1b[1mbold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[2mdim\x1b[0m \x1b[9mstrike\x1b[0m\r\nUTF-8: 안녕하세요 — 日本語\r\n\x1b[4mUnderline\x1b[0m  \x1b[7mInverse\x1b[0m  \x1b[48;5;24m 256-color \x1b[0m\r\n'; test -t 0 && test -t 1 && test -t 2")
         } else {
             command.push(match env.get("SHELL") { Some(shell) => shell, None => "sh" })
         }
     }
     configure_terminfo()
+    let shell_name = String.from(basename(command[0]))
     var app = App { term: terminal.Terminal.new(80, 24), session: pty.spawn(command, 80, 24),
-        cell_width: 1, cell_height: 1, padding: 0 }
+        cell_width: 1, cell_height: 1, padding: 0, theme: cfg.make_theme(),
+        frame: renderer.Frame { title: shell_name, segments: Vec(String).new(), status_bar: cfg.status_bar == 1,
+            focused: true, bell: -1.0, cursor_style: cfg.cursor_style, cursor_blink: cfg.cursor_blink && smoke.len == 0,
+            cursor_glow: cfg.cursor_glow, cursor_trail: cfg.cursor_trail && smoke.len == 0,
+            gradient: cfg.gradient, vignette: cfg.vignette, opacity: cfg.opacity,
+            mouse_x: 0.0, mouse_y: 0.0, params: [0.0; 8], toast: String.new(), toast_time: 0.0 },
+        plugins: Vec(plugin.Plugin).new(), zoom: 0, next_theme: false, next_shader: false,
+        reload: false, mouse_x: 0.0, mouse_y: 0.0 }
+    for spec in cfg.plugins {
+        match plugin.load(spec.as_str()) {
+            Ok(p) => { app.frame.segments.push(String.new()); app.plugins.push(p) }
+            Err(message) => eprintln("banana: " + message.as_str())
+        }
+    }
+    app.session.tap = !app.plugins.is_empty()
+    var theme_index = theme.index_of(cfg.theme.as_str())
+    let shader_choices = config.bundled("shaders", ".glsl")
+    var shader_index: i64 = -1
+    var shader_names = cfg.shaders.clone()
+    var font_size = cfg.font_size
     unsafe {
         api.glfwSetErrorCallback(on_error)
         api.glfwInitHint(0x00050003, 0x00060003) // GLFW_PLATFORM_WAYLAND
@@ -186,6 +284,7 @@ fn run() -> i32 {
         api.glfwWindowHint(0x00022002, 3); api.glfwWindowHint(0x00022003, 3)
         api.glfwWindowHint(0x00022008, 0x00032001) // OpenGL 3.3 core
         api.glfwWindowHint(0x0002200b, 0x00036002) // EGL on Wayland
+        if cfg.opacity < 1.0 { api.glfwWindowHint(0x0002000a, 1) } // GLFW_TRANSPARENT_FRAMEBUFFER
         api.glfwWindowHintString(0x00026001, "banana")
         let window = api.glfwCreateWindow(1000, 650, "Banana", null, null)
         if window == null { api.glfwTerminate(); return 1 }
@@ -195,54 +294,130 @@ fn run() -> i32 {
         api.glfwSetScrollCallback(window, on_scroll)
         api.glfwSetCursorPosCallback(window, on_mouse_move)
         api.glfwSetMouseButtonCallback(window, on_mouse_button)
+        api.glfwSetWindowFocusCallback(window, on_focus)
         var scale: f32 = 1.0; var scale_y: f32 = 1.0
         api.glfwGetWindowContentScale(window, &scale, &scale_y)
-        var render = renderer.Renderer.new(family, font_size, scale)
+        var render = renderer.Renderer.new(cfg.font.as_str(), font_size, scale, cfg.padding, cfg.line_height)
+        render.set_effects(shader_names.clone())
         app.cell_width = render.cell_width; app.cell_height = render.cell_height; app.padding = render.padding
         var old_width: i32 = 0; var old_height: i32 = 0
-        var last_cursor = true
+        var bar_shown = app.frame.status_bar
         let started = api.glfwGetTime()
         var captured = false
         var smoke_selected = false
         var rendered_frames: i64 = 0
+        var last_tick: f64 = -1.0
         while api.glfwWindowShouldClose(window) == 0 {
+            let now = api.glfwGetTime() - started
             app.session.receive(&app.term)
+            if !app.session.tapped.is_empty() {
+                for p in app.plugins { p.output(app.session.tapped.as_str()) }
+                app.session.tapped.clear()
+            }
+            if now - last_tick >= 0.016 {
+                for p in app.plugins { p.tick(now) }
+                last_tick = now
+            }
+            // Apply what plugins asked for.
+            for index in 0..app.plugins.len() {
+                let inbox = app.plugins[index].drain()
+                if !inbox.send.is_empty() { app.session.send(inbox.send.as_str()) }
+                if !inbox.feed.is_empty() { app.term.feed(inbox.feed.as_str()) }
+                if inbox.status_changed {
+                    app.frame.segments[index] = inbox.status.clone()
+                    app.term.dirty = true
+                }
+                if inbox.params_changed { app.frame.params = inbox.params; app.term.dirty = true }
+                if inbox.redraw { app.term.dirty = true }
+            }
+            if app.term.bell {
+                app.term.bell = false
+                if cfg.visual_bell { app.frame.bell = now; app.term.dirty = true }
+            }
             if !app.term.title.is_empty() {
                 let title = ffi.c_string(app.term.title.as_str()).unwrap()
                 api.glfwSetWindowTitle(window, title.as_str().ptr)
-                app.term.title.clear()
+                app.frame.title = mem.replace(&app.term.title, String.new())
             }
+            if app.next_theme {
+                app.next_theme = false
+                theme_index = if theme_index < 0 { 0 } else { (theme_index + 1) % theme.NAMES }
+                app.theme = theme.builtin(theme.name_at(theme_index)).unwrap()
+                show_toast(&app.frame, "theme: " + theme.name_at(theme_index), now)
+                app.term.dirty = true
+            }
+            if app.next_shader {
+                app.next_shader = false
+                shader_names.clear()
+                if !shader_choices.is_empty() {
+                    shader_index = if shader_index + 1 >= shader_choices.len() as i64 { -1 } else { shader_index + 1 }
+                    if shader_index >= 0 { shader_names.push(shader_choices[shader_index].clone()) }
+                }
+                render.set_effects(shader_names.clone())
+                let label = render.effect_names()
+                show_toast(&app.frame, "shader: " + (if label.is_empty() { "none" } else { label.as_str() }), now)
+                app.term.dirty = true
+            }
+            if app.reload {
+                app.reload = false
+                render.reload_effects(now, true)
+                show_toast(&app.frame, "shaders reloaded", now)
+                app.term.dirty = true
+            } else if render.reload_effects(now, false) { app.term.dirty = true }
             var width: i32 = 0; var height: i32 = 0
             api.glfwGetFramebufferSize(window, &width, &height)
             var next_scale: f32 = 1.0
             api.glfwGetWindowContentScale(window, &next_scale, &scale_y)
+            if app.zoom != 0 {
+                if app.zoom == 2 { font_size = cfg.font_size }
+                else { font_size = terminal.clamp(font_size + app.zoom, 6, 72) }
+                app.zoom = 0
+                var message = String.from("font size ")
+                font_size.show(&message)
+                show_toast(&app.frame, message.as_str(), now)
+                scale = 0.0 // Rebuild the renderer below.
+            }
             if next_scale != scale {
-                render = renderer.Renderer.new(family, font_size, next_scale)
+                drop(render)
+                render = renderer.Renderer.new(cfg.font.as_str(), font_size, next_scale, cfg.padding, cfg.line_height)
+                render.set_effects(shader_names.clone())
                 app.term.clear_selection()
                 app.cell_width = render.cell_width; app.cell_height = render.cell_height; app.padding = render.padding
                 scale = next_scale; old_width = 0
             }
+            var wants_bar = cfg.status_bar == 1
+            if cfg.status_bar == 2 { for seg in app.frame.segments { if !seg.is_empty() { wants_bar = true } } }
+            if wants_bar != bar_shown { bar_shown = wants_bar; app.frame.status_bar = wants_bar; old_width = 0 }
             if width > 0 && height > 0 {
                 var resized = false
                 if width != old_width || height != old_height {
+                    let bar = if bar_shown { render.bar_height } else { 0 }
                     let cols = terminal.clamp((width as i64 - 2 * render.padding) / render.cell_width, 2, 1000)
-                    let rows = terminal.clamp((height as i64 - 2 * render.padding) / render.cell_height, 1, 500)
-                    app.term.resize(cols, rows); app.term.dirty = true
-                    app.session.resize(cols, rows, width, height)
+                    let rows = terminal.clamp((height as i64 - 2 * render.padding - bar) / render.cell_height, 1, 500)
+                    if cols != app.term.cols || rows != app.term.rows {
+                        app.term.resize(cols, rows)
+                        app.session.resize(cols, rows, width, height)
+                        for p in app.plugins { p.resize(cols, rows) }
+                    }
+                    app.term.dirty = true
                     old_width = width; old_height = height
                     resized = true
                 }
-                let cursor = smoke.len > 0 || (api.glfwGetTime() * 2.0) as i64 % 2 == 0
-                if cursor != last_cursor { app.term.dirty = true; last_cursor = cursor }
                 if smoke.len > 0 && !captured { app.term.dirty = true }
-                if app.term.dirty {
+                var ww: i32 = 0; var wh: i32 = 0
+                api.glfwGetWindowSize(window, &ww, &wh)
+                if ww > 0 && wh > 0 {
+                    app.frame.mouse_x = (app.mouse_x * width as f64 / ww as f64) as f32
+                    app.frame.mouse_y = (app.mouse_y * height as f64 / wh as f64) as f32
+                }
+                if app.term.dirty || render.animating(app.term, app.frame, now) {
                     if smoke.len > 0 && app.session.eof && !smoke_selected {
                         app.term.start_selection(0, 0)
                         app.term.update_selection(6, 0)
                         app.term.selecting = false
                         smoke_selected = true
                     }
-                    render.draw(app.term, width, height, cursor)
+                    render.draw(app.term, app.theme, app.frame, width, height, now)
                     let error = api.glGetError()
                     if error != 0 { panic("OpenGL rendering error") }
                     // EGL applies the initial Wayland surface resize at swap.
@@ -262,7 +437,8 @@ fn run() -> i32 {
             if smoke.len > 0 && api.glfwGetTime() - started > 10.0 { break }
             api.glfwWaitEventsTimeout(0.008)
         }
-        // GPU objects must be destroyed while their context is current.
+        // Plugins and GPU objects go first, while the context is current.
+        app.plugins.clear()
         drop(render)
         api.glfwSetWindowUserPointer(window, null)
         api.glfwDestroyWindow(window); api.glfwTerminate()

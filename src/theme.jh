@@ -1,0 +1,134 @@
+// Color themes. Cells refer to theme colors, so a theme can change while running.
+import terminal
+
+#[derive(Clone)]
+pub struct Theme {
+    pub name: String
+    pub foreground: u32
+    pub background: u32
+    // The window background fades from `background` at the top to this.
+    pub background_end: u32
+    pub cursor: u32
+    pub cursor_text: u32
+    pub selection: u32
+    pub selection_text: u32
+    pub accent: u32
+    pub bar: u32
+    pub bar_text: u32
+    pub palette: [u32; 16]
+}
+
+pub const NAMES: i64 = 6
+
+pub fn name_at(index: i64) -> str {
+    let i = index % NAMES
+    if i == 0 { "banana" } else if i == 1 { "midnight" } else if i == 2 { "matcha" }
+    else if i == 3 { "ember" } else if i == 4 { "glacier" } else { "banana-light" }
+}
+
+pub fn index_of(name: str) -> i64 {
+    for i in 0..NAMES { if name_at(i) == name { return i } }
+    -1
+}
+
+pub fn builtin(name: str) -> Option(Theme) {
+    if name == "banana" {
+        // Deep ink with ripe-banana highlights.
+        return Some(Theme { name: String.from(name), foreground: 0xdfe4ee, background: 0x161a23,
+            background_end: 0x0d1016, cursor: 0xf6d365, cursor_text: 0x161a23,
+            selection: 0x34405a, selection_text: 0xf6f7fb, accent: 0xf6d365,
+            bar: 0x1d222d, bar_text: 0x8c95a8,
+            palette: [0x222834 as u32, 0xf07a8a, 0xa6d189, 0xf6d365, 0x82aaf2, 0xc7a0e8, 0x7fd1d0, 0xdfe4ee,
+                0x5c6578, 0xff94a2, 0xbfe5a4, 0xffe28f, 0xa2c1ff, 0xdcbcf6, 0x9fe6e3, 0xf6f7fb] })
+    }
+    if name == "midnight" {
+        return Some(Theme { name: String.from(name), foreground: 0xd8d6f0, background: 0x17142a,
+            background_end: 0x0b0a16, cursor: 0xb69cff, cursor_text: 0x17142a,
+            selection: 0x352e5c, selection_text: 0xf4f2ff, accent: 0xb69cff,
+            bar: 0x1d1934, bar_text: 0x8a85ad,
+            palette: [0x241f3d as u32, 0xff7aa8, 0x8fe3b0, 0xffd38a, 0x8ab4ff, 0xc39bff, 0x7adbe8, 0xd8d6f0,
+                0x5d5784, 0xff9cc0, 0xaaf0c6, 0xffe2ab, 0xa9c8ff, 0xd6b8ff, 0x9de8f1, 0xf4f2ff] })
+    }
+    if name == "matcha" {
+        return Some(Theme { name: String.from(name), foreground: 0xdbe5d6, background: 0x141c18,
+            background_end: 0x0b100d, cursor: 0xa8d8a0, cursor_text: 0x141c18,
+            selection: 0x2e4237, selection_text: 0xf2f7ef, accent: 0xa8d8a0,
+            bar: 0x19221d, bar_text: 0x86998c,
+            palette: [0x1f2a24 as u32, 0xe8857a, 0xa8d8a0, 0xe4cf8a, 0x8fb8d8, 0xc6a6d2, 0x86cfc0, 0xdbe5d6,
+                0x55685c, 0xf2a196, 0xc0e8b8, 0xf0dfa6, 0xaacde8, 0xd8bfe2, 0xa2e0d2, 0xf2f7ef] })
+    }
+    if name == "ember" {
+        return Some(Theme { name: String.from(name), foreground: 0xeadcd2, background: 0x1e1614,
+            background_end: 0x110c0b, cursor: 0xff9e64, cursor_text: 0x1e1614,
+            selection: 0x4a3129, selection_text: 0xfff4ec, accent: 0xff9e64,
+            bar: 0x261c19, bar_text: 0xa28e84,
+            palette: [0x2b201d as u32, 0xf2766b, 0xb8c47a, 0xf5b85f, 0x7fa4d6, 0xd494b8, 0x86c2b0, 0xeadcd2,
+                0x6b5850, 0xff958a, 0xcfd996, 0xffcf85, 0x9fbde6, 0xe5b0cd, 0xa4d6c7, 0xfff4ec] })
+    }
+    if name == "glacier" {
+        return Some(Theme { name: String.from(name), foreground: 0xd6e6ef, background: 0x0f1b24,
+            background_end: 0x081017, cursor: 0x7fdbff, cursor_text: 0x0f1b24,
+            selection: 0x22425a, selection_text: 0xf0f8fc, accent: 0x7fdbff,
+            bar: 0x13222d, bar_text: 0x7f98a8,
+            palette: [0x172833 as u32, 0xf48b9a, 0x8fdcb4, 0xf0d58c, 0x7fb6ff, 0xb9a3f0, 0x7fdbff, 0xd6e6ef,
+                0x4f6878, 0xffa6b3, 0xaee9ca, 0xf8e3ab, 0xa1c9ff, 0xcdbcf6, 0xa6e8ff, 0xf0f8fc] })
+    }
+    if name == "banana-light" {
+        return Some(Theme { name: String.from(name), foreground: 0x3a3631, background: 0xfbf7ec,
+            background_end: 0xf1ead8, cursor: 0xc98a00, cursor_text: 0xfbf7ec,
+            selection: 0xf1dc9b, selection_text: 0x2a2621, accent: 0xc98a00,
+            bar: 0xf0e8d4, bar_text: 0x8a8070,
+            palette: [0x3a3631 as u32, 0xc8414f, 0x4f8a3a, 0xa87800, 0x3d6cc2, 0x8f4fb3, 0x2c8a8a, 0xd8d0bf,
+                0x7a7266, 0xe0566a, 0x63a34d, 0xc48f12, 0x5585dc, 0xa868cc, 0x3aa3a3, 0xfffdf6] })
+    }
+    None
+}
+
+impl Theme {
+    pub fn resolve(self, c: u32) -> u32 {
+        if c == terminal.FOREGROUND { self.foreground }
+        else if c == terminal.BACKGROUND { self.background }
+        else if c & 0xff000000 == terminal.PALETTE { self.palette[(c & 15) as i64] }
+        else { c }
+    }
+
+    // Applies a `key = #rrggbb` override from the configuration.
+    pub fn set(inout self, key: str, rgb: u32) -> bool {
+        if key == "foreground" { self.foreground = rgb }
+        else if key == "background" { self.background = rgb; self.background_end = rgb }
+        else if key == "background-end" { self.background_end = rgb }
+        else if key == "cursor" { self.cursor = rgb }
+        else if key == "cursor-text" { self.cursor_text = rgb }
+        else if key == "selection" { self.selection = rgb }
+        else if key == "selection-text" { self.selection_text = rgb }
+        else if key == "accent" { self.accent = rgb }
+        else if key == "bar" { self.bar = rgb }
+        else if key == "bar-text" { self.bar_text = rgb }
+        else if key.starts_with("color") {
+            match key[5..].parse_int() {
+                Some(n) => {
+                    if n < 0 || n > 15 { return false }
+                    self.palette[n] = rgb
+                }
+                None => { return false }
+            }
+        } else { return false }
+        true
+    }
+}
+
+// "#rrggbb" or "rrggbb".
+pub fn parse_color(text: str) -> Option(u32) {
+    let s = if text.starts_with("#") { text[1..] } else { text }
+    if s.len != 6 { return None }
+    var value: u32 = 0
+    for b in s {
+        var digit: u32 = 0
+        if b >= '0' && b <= '9' { digit = (b - '0') as u32 }
+        else if b >= 'a' && b <= 'f' { digit = (b - 'a' + 10) as u32 }
+        else if b >= 'A' && b <= 'F' { digit = (b - 'A' + 10) as u32 }
+        else { return None }
+        value = value * 16 + digit
+    }
+    Some(value)
+}

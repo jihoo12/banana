@@ -2,8 +2,11 @@
 import std.mem
 import input
 
-pub const FOREGROUND: u32 = 0xd9e2ee
-pub const BACKGROUND: u32 = 0x10151d
+// Colors are 0xRRGGBB, or refer to the theme so themes can change live:
+// PALETTE | n is ANSI color n (0..15), FOREGROUND and BACKGROUND the defaults.
+pub const PALETTE: u32 = 0x01000000
+pub const FOREGROUND: u32 = 0x02000000
+pub const BACKGROUND: u32 = 0x03000000
 pub const HISTORY_LIMIT: i64 = 2000
 
 pub fn clamp(n: i64, lo: i64, hi: i64) -> i64 {
@@ -11,12 +14,8 @@ pub fn clamp(n: i64, lo: i64, hi: i64) -> i64 {
 }
 
 pub fn color(index: i64) -> u32 {
-    let palette = [0x18212e as u32, 0xef7181, 0x9dcc83, 0xe8c47c,
-        0x80aaf0, 0xc69ce0, 0x79c9cf, 0xd9e2ee,
-        0x59677b, 0xff8998, 0xb9e49b, 0xf7dc99,
-        0x9bc2ff, 0xdeb8f5, 0x98e1e5, 0xf4f7fc]
     let n = clamp(index, 0, 255)
-    if n < 16 { return palette[n] }
+    if n < 16 { return PALETTE | n as u32 }
     if n >= 232 {
         let v = (8 + (n - 232) * 10) as u32
         return v * 0x010101
@@ -45,7 +44,7 @@ pub struct Cell {
     pub cp: u32
     pub fg: u32
     pub bg: u32
-    pub attrs: i64 // 1: bold, 2: underline, 4: inverse
+    pub attrs: i64 // 1: bold, 2: underline, 4: inverse, 8: dim, 16: italic, 32: strike, 64: hidden
     pub width: i64 // 0 marks the trailing half of a wide character
 }
 
@@ -74,6 +73,9 @@ pub struct Terminal {
     pub dirty: bool
     pub replies: String
     pub title: String
+    // DECSCUSR: 0 is the configured style; 1-2 block, 3-4 underline, 5-6 bar.
+    pub cursor_shape: i64
+    pub bell: bool
     pub selecting: bool
     selection_active: bool
     selection_anchor: Position
@@ -98,6 +100,7 @@ pub struct Terminal {
     origin: bool
     state: i64
     private_mode: bool
+    intermediate: u8
     args: [i64; 16]
     arg: i64
     osc: String
@@ -114,6 +117,7 @@ impl Terminal {
             view: 0, x: 0, y: 0, cursor_visible: true, application_cursor: false,
             bracketed_paste: false, alternate: false, dirty: true,
             replies: String.new(), title: String.new(), saved: Vec(Cell).new(),
+            cursor_shape: 0, bell: false, intermediate: 0,
             selecting: false, selection_active: false,
             selection_anchor: Position { x: 0, row: 0 }, selection_head: Position { x: 0, row: 0 },
             history_origin: 0, wrapped: Vec(i64).filled(r, 0),
@@ -377,11 +381,18 @@ impl Terminal {
             let n = self.args[i]
             if n == 0 { self.fg = FOREGROUND; self.bg = BACKGROUND; self.attrs = 0 }
             else if n == 1 { self.attrs |= 1 }
+            else if n == 2 { self.attrs |= 8 }
+            else if n == 3 { self.attrs |= 16 }
             else if n == 4 { self.attrs |= 2 }
             else if n == 7 { self.attrs |= 4 }
-            else if n == 22 { self.attrs &= 6 }
-            else if n == 24 { self.attrs &= 5 }
-            else if n == 27 { self.attrs &= 3 }
+            else if n == 8 { self.attrs |= 64 }
+            else if n == 9 { self.attrs |= 32 }
+            else if n == 22 { self.attrs &= 127 - 9 }
+            else if n == 23 { self.attrs &= 127 - 16 }
+            else if n == 24 { self.attrs &= 127 - 2 }
+            else if n == 27 { self.attrs &= 127 - 4 }
+            else if n == 28 { self.attrs &= 127 - 64 }
+            else if n == 29 { self.attrs &= 127 - 32 }
             else if n == 39 { self.fg = FOREGROUND }
             else if n == 49 { self.bg = BACKGROUND }
             else if n >= 30 && n <= 37 { self.fg = color(n - 30) }
@@ -422,6 +433,10 @@ impl Terminal {
                     else if mode == 2004 { self.bracketed_paste = enabled }
                 }
             }
+            return
+        }
+        if self.intermediate == ' ' {
+            if final == 'q' { self.cursor_shape = clamp(self.args[0], 0, 6) }
             return
         }
         if final == 'm' { self.sgr() }
@@ -526,6 +541,7 @@ impl Terminal {
         if b == 27 { self.state = 1; self.utf_left = 0; return }
         if b < 32 {
             if b == 13 { self.x = 0; self.wrap = false }
+            else if b == 7 { self.bell = true }
             else if b == 10 || b == 11 || b == 12 { self.wrapped[self.y] = 0; self.newline() }
             else if b == 8 { self.x = clamp(self.x - 1, 0, self.cols - 1); self.wrap = false }
             else if b == 9 { self.x = clamp((self.x / 8 + 1) * 8, 0, self.cols - 1); self.wrap = false }
@@ -534,7 +550,7 @@ impl Terminal {
         if self.state == 5 { self.state = 0; return }
         if self.state == 1 {
             self.state = 0
-            if b == '[' { self.state = 2; self.args = [0; 16]; self.arg = 0; self.private_mode = false }
+            if b == '[' { self.state = 2; self.args = [0; 16]; self.arg = 0; self.private_mode = false; self.intermediate = 0 }
             else if b == ']' { self.state = 3; self.osc.clear() }
             else if b == 'P' || b == '_' || b == '^' { self.state = 6 }
             else if b == '(' || b == ')' || b == '*' || b == '+' || b == '%' { self.state = 5 }
@@ -550,6 +566,7 @@ impl Terminal {
                 self.x = 0; self.y = 0; self.top = 0; self.bottom = self.rows - 1
                 self.autowrap = true; self.origin = false; self.wrap = false
                 self.cursor_visible = true; self.application_cursor = false; self.bracketed_paste = false
+                self.cursor_shape = 0
                 self.erase(0, self.cells.len())
             }
             return
@@ -558,6 +575,7 @@ impl Terminal {
             if b >= '0' && b <= '9' { self.args[self.arg] = clamp(self.args[self.arg] * 10 + (b - '0') as i64, 0, 100000) }
             else if b == ';' || b == ':' { if self.arg < 15 { self.arg += 1 } }
             else if b == '?' { self.private_mode = true }
+            else if b >= 0x20 && b <= 0x2f { self.intermediate = b }
             else if b >= 0x40 && b <= 0x7e { self.csi(b); self.state = 0 }
             return
         }

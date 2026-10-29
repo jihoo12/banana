@@ -1,0 +1,207 @@
+// Shared-library plugins; the C interface is include/banana_plugin.h.
+import config
+import std.ffi
+import std.mem
+import std.sys
+
+pub const ABI: u32 = 1
+
+// Mirrors BananaHost.
+struct Host {
+    abi: u32
+    reserved: u32
+    ctx: *u8
+    send: fnptr(*u8, *u8, i64)
+    feed: fnptr(*u8, *u8, i64)
+    set_status: fnptr(*u8, *u8)
+    log: fnptr(*u8, *u8)
+    set_param: fnptr(*u8, i32, f32)
+    request_redraw: fnptr(*u8)
+}
+
+// What a plugin asked for during its last call; the host applies it afterwards
+// so that plugins never touch the terminal while Banana is using it.
+pub struct Inbox {
+    pub send: String
+    pub feed: String
+    pub status: String
+    pub status_changed: bool
+    pub params: [f32; 8]
+    pub params_changed: bool
+    pub redraw: bool
+}
+
+// One heap block per plugin: its address is the `ctx` the plugin holds.
+struct Slot {
+    host: Host
+    inbox: Inbox
+    name: String
+}
+
+unsafe fn slot(ctx: *u8) -> *Slot { ctx as *Slot }
+
+unsafe fn c_bytes(bytes: *u8, length: i64) -> str {
+    if bytes == null || length <= 0 { "" } else { make_str(bytes, length) }
+}
+
+export fn banana_host_send(ctx: *u8, bytes: *u8, length: i64) {
+    unsafe { (*slot(ctx)).inbox.send.push_str(c_bytes(bytes, length)) }
+}
+
+export fn banana_host_feed(ctx: *u8, bytes: *u8, length: i64) {
+    unsafe { (*slot(ctx)).inbox.feed.push_str(c_bytes(bytes, length)) }
+}
+
+export fn banana_host_set_status(ctx: *u8, text: *u8) {
+    unsafe {
+        let s = slot(ctx)
+        (*s).inbox.status = if text == null { String.new() } else { ffi.copy_c_string(text) }
+        (*s).inbox.status_changed = true
+    }
+}
+
+export fn banana_host_log(ctx: *u8, text: *u8) {
+    unsafe {
+        var line = String.from("banana: [")
+        line.push_str((*slot(ctx)).name.as_str())
+        line.push_str("] ")
+        if text != null { line.push_str(ffi.copy_c_string(text).as_str()) }
+        line.push('\n')
+        sys.write_err(line.as_str())
+    }
+}
+
+export fn banana_host_set_param(ctx: *u8, index: i32, value: f32) {
+    if index < 0 || index > 7 { return }
+    unsafe {
+        (*slot(ctx)).inbox.params[index as i64] = value
+        (*slot(ctx)).inbox.params_changed = true
+    }
+}
+
+export fn banana_host_request_redraw(ctx: *u8) {
+    unsafe { (*slot(ctx)).inbox.redraw = true }
+}
+
+pub struct Plugin {
+    pub name: String
+    slot: *Slot
+    state: *u8
+    on_output: *u8
+    on_key: *u8
+    on_tick: *u8
+    on_resize: *u8
+    on_destroy: *u8
+    library: ffi.Library
+}
+
+fn optional(library: ffi.Library, name: str) -> *u8 {
+    unsafe { match library.symbol(name) { Ok(p) => p, Err(_) => null } }
+}
+
+// `spec` is a name or path, then optional arguments for the plugin.
+pub fn load(spec: str) -> Result(Plugin, String) {
+    let trimmed = spec.trim()
+    var split = trimmed.len
+    for i in 0..trimmed.len { if trimmed[i] == ' ' || trimmed[i] == '\t' { split = i; break } }
+    let target = trimmed[0..split]
+    let args = trimmed[split..].trim()
+    let path = match config.search("plugins", target, ".so") {
+        Some(p) => p
+        None => { return Err(String.from("plugin not found: ") + target) }
+    }
+    var stem = target
+    var start = 0
+    for i in 0..stem.len { if stem[i] == '/' { start = i + 1 } }
+    stem = stem[start..]
+    if stem.ends_with(".so") { stem = stem[0..stem.len - 3] }
+    unsafe {
+        let library = match ffi.Library.open(path.as_str()) {
+            Ok(l) => l
+            Err(message) => { return Err(message) }
+        }
+        let init = match library.symbol("banana_plugin_init") {
+            Ok(p) => p as fnptr(*Host, *u8, **u8) -> i32
+            Err(_) => { return Err(path.as_str() + ": missing banana_plugin_init") }
+        }
+        let s = mem.alloc(Slot, 1)
+        write(s, Slot {
+            host: Host { abi: ABI, reserved: 0, ctx: s as *u8, send: banana_host_send,
+                feed: banana_host_feed, set_status: banana_host_set_status, log: banana_host_log,
+                set_param: banana_host_set_param, request_redraw: banana_host_request_redraw },
+            inbox: Inbox { send: String.new(), feed: String.new(), status: String.new(),
+                status_changed: false, params: [0.0; 8], params_changed: false, redraw: false },
+            name: String.from(stem) })
+        var plugin = Plugin { name: String.from(stem), slot: s, state: null,
+            on_output: optional(library, "banana_plugin_output"),
+            on_key: optional(library, "banana_plugin_key"),
+            on_tick: optional(library, "banana_plugin_tick"),
+            on_resize: optional(library, "banana_plugin_resize"),
+            on_destroy: null, library }
+        let c_args = ffi.c_string(args).unwrap()
+        var state: *u8 = null
+        if init(&(*s).host, c_args.as_str().ptr, &state) != 0 {
+            return Err(String.from(stem) + ": initialization failed")
+        }
+        plugin.state = state
+        plugin.on_destroy = optional(plugin.library, "banana_plugin_destroy")
+        Ok(plugin)
+    }
+}
+
+impl Plugin {
+    // Takes what the plugin asked for since the last call.
+    pub fn drain(inout self) -> Inbox {
+        unsafe {
+            let params = (*self.slot).inbox.params
+            mem.replace(&(*self.slot).inbox, Inbox { send: String.new(), feed: String.new(),
+                status: String.new(), status_changed: false, params, params_changed: false, redraw: false })
+        }
+    }
+
+    pub fn output(self, bytes: str) {
+        if self.on_output == null || bytes.len == 0 { return }
+        unsafe {
+            let f = self.on_output as fnptr(*u8, *u8, i64)
+            f(self.state, bytes.ptr, bytes.len)
+        }
+    }
+
+    pub fn key(self, key: i32, mods: i32) -> bool {
+        if self.on_key == null { return false }
+        unsafe {
+            let f = self.on_key as fnptr(*u8, i32, i32) -> i32
+            f(self.state, key, mods) != 0
+        }
+    }
+
+    pub fn tick(self, time: f64) {
+        if self.on_tick == null { return }
+        unsafe {
+            let f = self.on_tick as fnptr(*u8, f64)
+            f(self.state, time)
+        }
+    }
+
+    pub fn resize(self, cols: i64, rows: i64) {
+        if self.on_resize == null { return }
+        unsafe {
+            let f = self.on_resize as fnptr(*u8, i32, i32)
+            f(self.state, cols as i32, rows as i32)
+        }
+    }
+}
+
+impl Drop for Plugin {
+    fn drop(inout self) {
+        unsafe {
+            if self.on_destroy != null {
+                let f = self.on_destroy as fnptr(*u8)
+                f(self.state)
+            }
+            mem.drop_at(Slot, self.slot)
+            mem.dealloc(Slot, self.slot, 1)
+        }
+        // `library` is closed after this, once no code of the plugin can run.
+    }
+}

@@ -16,7 +16,9 @@
           compiler = jihoo.packages.${system}.default;
           libraries = with pkgs; [ glfw libglvnd freetype fontconfig ];
           fonts = pkgs.makeFontsConf {
-            fontDirectories = [ pkgs.dejavu_fonts pkgs.noto-fonts-cjk-sans ];
+            fontDirectories = with pkgs; [
+              jetbrains-mono dejavu_fonts noto-fonts-cjk-sans nerd-fonts.symbols-only
+            ];
           };
           tools = with pkgs; [ compiler llvmPackages_21.clang pkg-config ncurses ];
         in { inherit pkgs compiler libraries fonts tools; };
@@ -40,11 +42,12 @@
         let c = configFor system; in {
           default = c.pkgs.stdenv.mkDerivation {
             pname = "banana";
-            version = "0.1.0";
+            version = "0.2.0";
             src = c.pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = c.pkgs.lib.fileset.unions [
-                ./src ./native ./tests ./tools ./banana.terminfo ./LICENSE
+                ./src ./native ./include ./plugins ./shaders ./tests ./tools
+                ./banana.terminfo ./banana.conf.example ./LICENSE
               ];
             };
             nativeBuildInputs = c.tools ++ [ c.pkgs.makeWrapper ];
@@ -55,8 +58,12 @@
             checkPhase = "bash tools/test.sh";
             installPhase = ''
               install -Dm755 build/banana $out/bin/banana
-              mkdir -p $out/share
+              mkdir -p $out/share/banana $out/lib/banana
               cp -r build/terminfo $out/share/terminfo
+              cp -r shaders $out/share/banana/shaders
+              cp -r build/plugins $out/lib/banana/plugins
+              install -Dm644 include/banana_plugin.h $out/include/banana_plugin.h
+              install -Dm644 banana.conf.example $out/share/banana/banana.conf.example
               wrapProgram $out/bin/banana \
                 --set-default FONTCONFIG_FILE ${c.fonts} \
                 --set TERMINFO $out/share/terminfo
