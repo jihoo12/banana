@@ -23,10 +23,10 @@ nix develop
 bash run.sh
 ```
 
-The flake provides the pinned jihoo 0.3.0 compiler, Clang, GLFW, OpenGL development
+The flake provides the pinned jihoo 0.4.0 compiler, Clang, GLFW, OpenGL development
 libraries, FreeType, fontconfig, ncurses, JetBrains Mono, DejaVu fonts, Noto CJK
 fonts, Nerd Font symbols, Python, and Weston. `flake.lock` pins the compiler to revision
-`722d2e274d1eb03a5547991f7da1ec241b6427a9`, matching the sibling `../jihoo`
+`e2c1a5325c570a5db501cdad03ef4700ea0988f4`, matching the sibling `../jihoo`
 checkout used for this update. The compiler package includes its matching
 standard library; re-enter `nix develop` after updating the lock file.
 
